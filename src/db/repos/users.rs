@@ -212,10 +212,11 @@ impl UserRepository {
             ));
         }
         let affected = sqlx::query(
-            "UPDATE users SET storage_used = storage_used + $1, updated_at = now() \
-             WHERE id = $2 AND storage_used + $1 <= storage_quota",
+            "UPDATE users SET storage_used = storage_used + $1, updated_at = $2 \
+             WHERE id = $3 AND storage_used + $1 <= storage_quota",
         )
         .bind(delta)
+        .bind(Utc::now().to_rfc3339())
         .bind(id.to_string())
         .execute(pool)
         .await
@@ -233,10 +234,11 @@ impl UserRepository {
             return Ok(());
         }
         sqlx::query(
-            "UPDATE users SET storage_used = GREATEST(storage_used - $1, 0), updated_at = now() \
-             WHERE id = $2",
+            "UPDATE users SET storage_used = GREATEST(storage_used - $1, 0), updated_at = $2 \
+             WHERE id = $3",
         )
         .bind(delta)
+        .bind(Utc::now().to_rfc3339())
         .bind(id.to_string())
         .execute(pool)
         .await
