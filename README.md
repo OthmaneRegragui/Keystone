@@ -637,4 +637,4 @@ PostgreSQL, automatic migrations on startup. Schema managed via 15 numbered migr
 
 ## License
 
-MIT
+Apache License 2.0 — see [LICENSE](LICENSE) for details.
