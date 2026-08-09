@@ -1,0 +1,17 @@
+target/
+.git/
+.gitignore
+.env
+.env.*
+*.db
+*.db-wal
+*.db-shm
+data/
+docs/
+tests/
+*.md
+Makefile
+rustfmt.toml
+clippy.toml
+run.sh
+docker/

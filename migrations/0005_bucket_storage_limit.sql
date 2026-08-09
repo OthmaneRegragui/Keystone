@@ -1,0 +1,1 @@
+ALTER TABLE buckets ADD COLUMN storage_limit INTEGER NOT NULL DEFAULT 0;

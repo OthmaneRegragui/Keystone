@@ -1,0 +1,79 @@
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.server
+    container_name: keystone-server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    # Run the server as PID 1 via tini so zombie processes are reaped and
+    # signals are forwarded correctly.
+    init: true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/api/health/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    env_file:
+      - ../.env
+    environment:
+      - KEYSTONE__SERVER__HOST=0.0.0.0
+      - APP_ENV=production
+      # Storage base directory INSIDE the container — read from .env
+      # (STORAGE_LOCAL_PATHS), default /mnt/keystone/data. MUST be an absolute
+      # path inside the container. Bucket files land at:
+      #   $STORAGE_LOCAL_PATHS/<storage-path-slug>/<bucket-name>/<blake3-shards>
+      # e.g. /mnt/keystone/data/test1/test1/fc/bd/<blake3-hash>
+      - STORAGE_LOCAL_PATHS=${STORAGE_LOCAL_PATHS:-/mnt/keystone/data}
+      # NOTE: if POSTGRES_PASSWORD contains URL-special characters (@ : / %),
+      # this URL must be percent-encoded manually, or set KEYSTONE__DATABASE__URL
+      # yourself. The server percent-encodes the password when it derives the
+      # URL from POSTGRES_* (bare-metal mode), but compose builds the URL above.
+      - KEYSTONE__DATABASE__URL=postgres://${POSTGRES_USER:-keystone}:${POSTGRES_PASSWORD:-keystone}@postgres:5432/${POSTGRES_DB:-keystone}
+    volumes:
+      # Where files live OUTSIDE the container is set with DATA_HOST_PATH in .env
+      # (only the mount source changes — the server always sees STORAGE_LOCAL_PATHS):
+      #   - unset/empty     -> Docker named volume "storagedata" (default, hidden
+      #                        on the host at
+      #                        /var/lib/docker/volumes/<project>_storagedata/_data)
+      #   - ./data          -> a real folder next to this project (docker-run.sh
+      #                        anchors relative paths to the project root)
+      #   - /any/abs/path   -> bind mount to that exact host path
+      # To switch a running install, copy the old data into the new location once
+      # (see README "Storage"), then set DATA_HOST_PATH and restart.
+      - ${DATA_HOST_PATH:-storagedata}:${STORAGE_LOCAL_PATHS:-/mnt/keystone/data}
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: keystone-postgres
+    restart: unless-stopped
+    environment:
+      # Change these from the defaults in ../.env before going live — the
+      # `server` service refuses to start in production with placeholder
+      # JWT/encryption secrets, and a weak POSTGRES_PASSWORD would be exposed
+      # on the published host port.
+      - POSTGRES_USER=${POSTGRES_USER:-keystone}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-keystone}
+      - POSTGRES_DB=${POSTGRES_DB:-keystone}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-keystone} -d ${POSTGRES_DB:-keystone}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Publish Postgres to the host on POSTGRES_PORT (default 5433 so it can
+    # never collide with a local Postgres on 5432). The container port stays
+    # 5432; only the host-side port is configurable. Set POSTGRES_PORT=5432
+    # in ../.env to use the standard port, or any free port.
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+
+volumes:
+  storagedata:
+  pgdata:

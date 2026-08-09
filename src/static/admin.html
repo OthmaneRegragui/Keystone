@@ -1,0 +1,1978 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin - Keystone</title>
+    <link rel="icon" type="image/svg+xml" href="/logo.svg">
+    <script defer src="/static/vendor/alpine.min.js"></script>
+    <script src="/static/vendor/tailwind.min.js"></script>
+    <style>
+        html:not(.dark) { color-scheme: light; }
+        html.dark { color-scheme: dark; }
+        html.dark body { background-color: #131316 !important; }
+        html.dark .bg-gray-50 { background-color: #131316 !important; }
+        html.dark .bg-white { background-color: #1a1a1f !important; }
+        html.dark .bg-gray-100 { background-color: #202027 !important; }
+        html.dark .bg-gray-200 { background-color: #26262e !important; }
+        html.dark .bg-gray-300 { background-color: #303038 !important; }
+        html.dark .bg-indigo-50 { background-color: #2b2b3d !important; }
+        html.dark .bg-indigo-50\/30 { background-color: rgba(43, 43, 61, 0.6) !important; }
+        html.dark .bg-indigo-100 { background-color: #35354a !important; }
+        html.dark .file\:bg-indigo-50 { background-color: #2b2b3d !important; }
+        html.dark .file\:text-indigo-700 { color: #a5b4fc !important; }
+        html.dark .text-gray-900 { color: #e8e8ea !important; }
+        html.dark .text-gray-800 { color: #d6d6da !important; }
+        html.dark .text-gray-700 { color: #c2c2c8 !important; }
+        html.dark .text-gray-600 { color: #a3a3ac !important; }
+        html.dark .text-gray-500 { color: #83838d !important; }
+        html.dark .text-gray-400 { color: #63636e !important; }
+        html.dark .text-gray-300 { color: #4c4c56 !important; }
+        html.dark .text-indigo-600, html.dark .text-indigo-500 { color: #a5b4fc !important; }
+        html.dark .text-indigo-700 { color: #93a0f7 !important; }
+        html.dark .text-indigo-800 { color: #b1c0ff !important; }
+        html.dark .text-red-600 { color: #f87171 !important; }
+        html.dark .text-green-600 { color: #4ade80 !important; }
+        html.dark .border-gray-100 { border-color: #232329 !important; }
+        html.dark .border-gray-200 { border-color: #2d2d34 !important; }
+        html.dark .border-gray-300 { border-color: #3b3b45 !important; }
+        html.dark .border-gray-400 { border-color: #4b4b57 !important; }
+        html.dark .border-indigo-200 { border-color: #3c3c55 !important; }
+        html.dark .placeholder-gray-400::placeholder { color: #63636e !important; }
+        html.dark .hover\:bg-gray-50:hover { background-color: #202027 !important; }
+        html.dark .hover\:bg-red-50:hover { background-color: rgba(127, 29, 29, 0.35) !important; }
+        /* Form controls: keep inputs/selects/textareas readable in dark mode */
+        html.dark input:not([type="checkbox"]):not([type="radio"]),
+        html.dark select,
+        html.dark textarea {
+            background-color: #202027 !important;
+            border-color: #3b3b45 !important;
+            color: #e8e8ea !important;
+        }
+        html.dark input:not([type="checkbox"]):not([type="radio"]):focus,
+        html.dark select:focus,
+        html.dark textarea:focus {
+            border-color: #a5b4fc !important;
+        }
+        html.dark input::placeholder,
+        html.dark textarea::placeholder { color: #63636e !important; }
+        html.dark select option { background-color: #1a1a1f !important; color: #e8e8ea !important; }
+        html.dark input[type="file"] { color: #a3a3ac !important; }
+    </style>
+    <script>
+        (function() {
+            // Light/dark theme: saved choice wins, otherwise follow the OS.
+            var savedTheme = null;
+            try { savedTheme = localStorage.getItem('theme'); } catch (e) {}
+            var dark = savedTheme ? savedTheme === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+            if (dark) document.documentElement.classList.add('dark');
+        })();
+        function clearAuth() {
+            try { localStorage.removeItem('token'); } catch (e) {}
+            try { localStorage.removeItem('refresh_token'); } catch (e) {}
+            try { localStorage.removeItem('user'); } catch (e) {}
+        }
+        (function() {
+            var token = null;
+            try { token = localStorage.getItem('token'); } catch (e) {}
+            if (!token) { window.location.href = '/login'; return; }
+            try {
+                var payload = JSON.parse(atob(token.split('.')[1]));
+                var now = Math.floor(Date.now() / 1000);
+                if (payload.exp && payload.exp < now) {
+                    // The refresh token lives in an httpOnly cookie set by the
+                    // server; refresh without a body and never persist it in
+                    // JS-accessible storage where an XSS could exfiltrate it.
+                    fetch('/auth/refresh', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' })
+                        .then(function(r) { if (!r.ok) { clearAuth(); window.location.href = '/login'; return null; } return r.json(); })
+                        .then(function(d) { if (d) { try { localStorage.setItem('token', d.access_token); localStorage.setItem('user', JSON.stringify(d.user)); } catch (e) {} } })
+                        .catch(function() { clearAuth(); window.location.href = '/login'; });
+                }
+            } catch(e) { clearAuth(); window.location.href = '/login'; }
+        })();
+        function fmtBytes(b) {
+            var n = Number(b);
+            if (!Number.isFinite(n) || n <= 0) return '0 B';
+            var u = ['B','KB','MB','GB','TB'];
+            var i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), u.length - 1);
+            return (n / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + u[i];
+        }
+        // Matches the backend slugifier: lowercase, keep [a-z0-9], collapse other runs to '-', trim '-'
+        function slugify(s) {
+            return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+        }
+        function sidebar() {
+            var u = null;
+            try { u = JSON.parse(localStorage.getItem('user') || 'null'); } catch (e) { u = null; }
+            return {
+                user: u,
+                userName: u ? u.username : '',
+                userEmail: u ? u.email : '',
+                userInitial: u && u.username ? u.username.charAt(0).toUpperCase() : '?',
+                themeDark: document.documentElement.classList.contains('dark'),
+                toggleTheme: function() {
+                    this.themeDark = !this.themeDark;
+                    document.documentElement.classList.toggle('dark', this.themeDark);
+                    try { localStorage.setItem('theme', this.themeDark ? 'dark' : 'light'); } catch (e) {}
+                },
+                active: function(p) { return window.location.pathname === p; },
+                sidebarOpen: false,
+                toggleSidebar: function() { this.sidebarOpen = !this.sidebarOpen; },
+                closeSidebar: function() { this.sidebarOpen = false; },
+                logout: function() {
+                    // Revoke the server-side session (httpOnly refresh cookie) if possible.
+                    try { fetch('/auth/logout', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' }); } catch (e) {}
+                    clearAuth();
+                    window.location.href = '/login';
+                }
+            };
+        }
+        function adminPanel() {
+            var params = new URLSearchParams(window.location.search);
+            var validTabs = ['overview','paths','buckets','groups','users','settings'];
+            var initialTab = validTabs.indexOf(params.get('page')) >= 0 ? params.get('page') : 'overview';
+
+            function authHeaders() {
+                var tok = null;
+                try { tok = localStorage.getItem('token'); } catch (e) {}
+                return { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' };
+            }
+
+            function redirectToLogin() {
+                clearAuth();
+                window.location.href = '/login';
+            }
+
+            function tryRefreshToken() {
+                // The refresh token lives in an httpOnly cookie set by the
+                // server; refresh without a body and never persist it in
+                // JS-accessible storage where an XSS could exfiltrate it.
+                return fetch('/auth/refresh', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}'
+                }).then(function(r) {
+                    if (!r.ok) { redirectToLogin(); return Promise.reject('refresh failed'); }
+                    return r.json();
+                }).then(function(data) {
+                    try {
+                        localStorage.setItem('token', data.access_token);
+                        localStorage.setItem('user', JSON.stringify(data.user));
+                    } catch (e) {}
+                    return data.access_token;
+                });
+            }
+
+            function authFetch(url, options) {
+                options = options || {};
+                options.headers = options.headers || {};
+                // If body is FormData, omit Content-Type (browser sets multipart boundary)
+                if (!(options.body instanceof FormData)) {
+                    if (!options.headers['Content-Type']) {
+                        options.headers['Content-Type'] = 'application/json';
+                    }
+                }
+                if (!options.headers['Authorization']) {
+                    var tok = null;
+                    try { tok = localStorage.getItem('token'); } catch (e) {}
+                    options.headers['Authorization'] = 'Bearer ' + tok;
+                }
+                return fetch(url, options).then(function(r) {
+                    if (r.status === 401) {
+                        return tryRefreshToken().then(function(newToken) {
+                            options.headers['Authorization'] = 'Bearer ' + newToken;
+                            return fetch(url, options);
+                        });
+                    }
+                    return r;
+                });
+            }
+            return {
+                tab: initialTab,
+                stats: { total_users: 0, total_files: 0, total_buckets: 0, total_groups: 0, block_registrations: true, active_user_files: 0, active_user_files_size: 0, deleted_user_files: 0, deleted_user_files_size: 0 },
+                settings: { block_registrations: true, allow_user_api_keys: false, allow_user_password_change: false },
+                users: [],
+                buckets: [],
+                backends: [],
+                groups: [],
+                groupDetail: null,
+                newBucket: { name: '', path: '' },
+                newBucketPathId: '',
+                showAddBucket: false,
+                newGroupName: '',
+                showAddGroup: false,
+                editingQuota: null,
+                quotaValue: '',
+                showModal: false,
+                modalMode: '',
+                modalUser: null,
+                modalForm: { username: '', email: '', password: '', role: 'user', group_ids: [] },
+                groupSearch: '',
+                showBucketModal: false,
+                editBucket: null,
+                editBucketForm: { name: '', path: '', is_active: true, storage_limit: 0 },
+                _bucketSearch: '',
+                _selectedBuckets: [],
+                storagePaths: [],
+                showAddPath: false,
+                newPath: { name: '' },
+                storageBase: { env_base: './storage' },
+                _memberFilter: '',
+                _userSearch: '',
+                _userRoleFilter: 'all',
+                _userGroupFilter: '',
+                _userLimit: '50',
+                _selectedUserIds: [],
+                showBulkGroupsModal: false,
+                bulkGroupSearch: '',
+                _bulkSelectedGroups: [],
+                showGroupMembersModal: false,
+                showGroupBucketsModal: false,
+                showGroupPermissionsModal: false,
+                currentGroup: null,
+                editingUserLimit: null,
+                userLimitValue: '',
+                showExportModal: false,
+                exportBucketName: '',
+                showImportModal: false,
+                importBucketName: '',
+                importCombinedStatus: '',
+                setTab: function(t) {
+                    this.tab = t;
+                    var url = new URL(window.location);
+                    url.searchParams.set('page', t);
+                    window.history.pushState({}, '', url);
+                },
+                init: function() {
+                    var self = this;
+                    self.loadStats();
+                    self.loadSettings();
+                    self.loadUsers();
+                    self.loadBuckets();
+                    self.loadBackends();
+                    self.loadGroups();
+                    self.loadStoragePaths();
+                    self.loadStorageBase();
+                },
+                loadStats: function() {
+                    var self = this;
+                    authFetch('/api/admin/stats')
+                        .then(function(r) { return r.json(); })
+                        .then(function(d) { self.stats = d; })
+                        .catch(function() {});
+                },
+                loadSettings: function() {
+                    var self = this;
+                    authFetch('/api/admin/settings')
+                        .then(function(r) { return r.json(); })
+                        .then(function(d) { self.settings = d; })
+                        .catch(function() {});
+                },
+                loadUsers: function() {
+                    var self = this;
+                    authFetch('/api/admin/users')
+                        .then(function(r) { return r.json(); })
+                        .then(function(d) { self.users = d; })
+                        .catch(function() {});
+                },
+                loadBuckets: function() {
+                    var self = this;
+                    authFetch('/api/admin/buckets')
+                        .then(function(r) { return r.json(); })
+                        .then(function(d) { self.buckets = d; })
+                        .catch(function() {});
+                },
+                loadBackends: function() {
+                    var self = this;
+                    authFetch('/api/admin/backends')
+                        .then(function(r) { return r.json(); })
+                        .then(function(d) { self.backends = d; })
+                        .catch(function() {});
+                },
+                loadGroups: function() {
+                    var self = this;
+                    authFetch('/api/admin/groups')
+                        .then(function(r) { return r.json(); })
+                        .then(function(d) { self.groups = d; })
+                        .catch(function() {});
+                },
+                loadStoragePaths: function() {
+                    var self = this;
+                    authFetch('/api/admin/paths')
+                        .then(function(r) { return r.json(); })
+                        .then(function(d) { self.storagePaths = d; })
+                        .catch(function() {});
+                },
+                loadStorageBase: function() {
+                    var self = this;
+                    authFetch('/api/admin/storage-base')
+                        .then(function(r) { return r.json(); })
+                        .then(function(d) {
+                            if (d && d.env_base) {
+                                self.storageBase = { env_base: d.env_base };
+                            }
+                        })
+                        .catch(function() {});
+                },
+                createStoragePath: function() {
+                    var self = this;
+                    if (!self.newPath.name) return;
+                    authFetch('/api/admin/paths', {
+                        method: 'POST',
+                        body: JSON.stringify({ name: self.newPath.name })
+                    }).then(function(r) {
+                        if (!r.ok) return r.json().then(function(e) { throw e; });
+                        return r.json();
+                    }).then(function() {
+                        self.newPath = { name: '' };
+                        self.showAddPath = false;
+                        self.loadStoragePaths();
+                    }).catch(function(e) { alert(e.detail || e.error || 'Failed to create path'); });
+                },
+                deleteStoragePath: function(id, name) {
+                    if (!confirm('Delete storage path "' + name + '"?')) return;
+                    var self = this;
+                    authFetch('/api/admin/paths', {
+                        method: 'DELETE',
+                        body: JSON.stringify({ id: id })
+                    }).then(function() {
+                        self.loadStoragePaths();
+                    }).catch(function() {});
+                },
+                toggleRegistration: function() {
+                    var self = this;
+                    var newVal = self.settings.block_registrations ? 'false' : 'true';
+                    authFetch('/api/admin/settings', {
+                        method: 'PUT',
+                        body: JSON.stringify({ key: 'block_registrations', value: newVal })
+                    }).then(function() { self.settings.block_registrations = !self.settings.block_registrations; self.loadStats(); });
+                },
+                toggleUserApiKeys: function() {
+                    var self = this;
+                    var newVal = self.settings.allow_user_api_keys ? 'false' : 'true';
+                    authFetch('/api/admin/settings', {
+                        method: 'PUT',
+                        body: JSON.stringify({ key: 'allow_user_api_keys', value: newVal })
+                    }).then(function() { self.settings.allow_user_api_keys = !self.settings.allow_user_api_keys; });
+                },
+                toggleUserPasswordChange: function() {
+                    var self = this;
+                    var newVal = self.settings.allow_user_password_change ? 'false' : 'true';
+                    authFetch('/api/admin/settings', {
+                        method: 'PUT',
+                        body: JSON.stringify({ key: 'allow_user_password_change', value: newVal })
+                    }).then(function() { self.settings.allow_user_password_change = !self.settings.allow_user_password_change; });
+                },
+                toggleGroupApiKeys: function(g) {
+                    var self = this;
+                    var newVal = g.allow_api_keys ? false : true;
+                    authFetch('/api/admin/groups/permissions', {
+                        method: 'PUT',
+                        body: JSON.stringify({ group_id: g.id, allow_api_keys: newVal, allow_password_change: g.allow_password_change })
+                    }).then(function(r) {
+                        if (r.ok) {
+                            g.allow_api_keys = newVal;
+                            self.loadGroups();
+                        }
+                    }).catch(function() {});
+                },
+                toggleGroupPasswordChange: function(g) {
+                    var self = this;
+                    var newVal = g.allow_password_change ? false : true;
+                    authFetch('/api/admin/groups/permissions', {
+                        method: 'PUT',
+                        body: JSON.stringify({ group_id: g.id, allow_api_keys: g.allow_api_keys, allow_password_change: newVal })
+                    }).then(function(r) {
+                        if (r.ok) {
+                            g.allow_password_change = newVal;
+                            self.loadGroups();
+                        }
+                    }).catch(function() {});
+                },
+                addBucket: function() {
+                    var self = this;
+                    if (!self.newBucket.name || !self.newBucketPathId) return;
+                    // Resolve path from selected storage path
+                    var selectedPath = self.storagePaths.find(function(p) { return p.id === self.newBucketPathId; });
+                    if (!selectedPath) return;
+                    authFetch('/api/admin/buckets', {
+                        method: 'POST',
+                        body: JSON.stringify({ name: self.newBucket.name, path: selectedPath.path + '/' + self.newBucket.name })
+                    }).then(function(r) {
+                        if (r.ok) {
+                            self.newBucket = { name: '', path: '' };
+                            self.newBucketPathId = '';
+                            self.showAddBucket = false;
+                            self.loadBuckets();
+                            self.loadBackends();
+                            self.loadStats();
+                        }
+                        return r.json();
+                    }).catch(function() {});
+                },
+                deleteBucket: function(name) {
+                    if (!confirm('Delete bucket "' + name + '"?')) return;
+                    var self = this;
+                    authFetch('/api/admin/buckets/delete', {
+                        method: 'POST',
+                        body: JSON.stringify({ name: name })
+                    }).then(function() {
+                        self.loadBuckets();
+                        self.loadBackends();
+                        self.loadStats();
+                    }).catch(function() {});
+                },
+                openExportModal: function(name) {
+                    this.exportBucketName = name;
+                    this.showExportModal = true;
+                },
+                openImportModal: function(name) {
+                    this.importBucketName = name;
+                    this.importCombinedStatus = '';
+                    this.showImportModal = true;
+                },
+                importCombined: function() {
+                    var self = this;
+                    var zipInput = document.getElementById('importZipInput');
+                    var jsonInput = document.getElementById('importJsonInput');
+                    if (!zipInput || !zipInput.files || !zipInput.files[0]) {
+                        self.importCombinedStatus = 'Please select a ZIP file.';
+                        return;
+                    }
+                    if (!jsonInput || !jsonInput.files || !jsonInput.files[0]) {
+                        self.importCombinedStatus = 'Please select a JSON index file.';
+                        return;
+                    }
+                    var zipFile = zipInput.files[0];
+                    var jsonFile = jsonInput.files[0];
+                    if (!zipFile.name.toLowerCase().endsWith('.zip')) {
+                        self.importCombinedStatus = 'ZIP file must be a .zip archive.';
+                        return;
+                    }
+                    if (!jsonFile.name.toLowerCase().endsWith('.json')) {
+                        self.importCombinedStatus = 'Index file must be a .json file.';
+                        return;
+                    }
+                    self.importCombinedStatus = 'Uploading & importing...';
+                    var formData = new FormData();
+                    formData.append('zip', zipFile);
+                    formData.append('index', jsonFile);
+                    authFetch('/api/admin/buckets/' + encodeURIComponent(self.importBucketName) + '/import-combined', {
+                        method: 'POST',
+                        body: formData
+                    }).then(function(r) {
+                        if (!r.ok) return r.json().then(function(e) { throw new Error(e.error || 'Import failed'); });
+                        return r.json();
+                    }).then(function(result) {
+                        var msg = 'Done! Imported ' + result.files_imported + ' file(s), ' + result.folders_created + ' folder(s).';
+                        if (result.errors && result.errors.length > 0) {
+                            msg += ' ' + result.errors.length + ' error(s).';
+                        }
+                        self.importCombinedStatus = msg;
+                        self.loadBuckets();
+                    }).catch(function(err) {
+                        self.importCombinedStatus = 'Error: ' + err.message;
+                    });
+                },
+                // Helper to download a blob from an authenticated GET endpoint
+                downloadBlob: function(url, filename) {
+                    var token = null;
+                    try { token = localStorage.getItem('token'); } catch (e) {}
+                    fetch(url, { headers: { 'Authorization': 'Bearer ' + token } })
+                        .then(function(r) {
+                            if (r.status === 401) {
+                                return tryRefreshToken().then(function(newToken) {
+                                    return fetch(url, { headers: { 'Authorization': 'Bearer ' + newToken } });
+                                });
+                            }
+                            if (!r.ok) throw new Error('Download failed');
+                            return r;
+                        })
+                        .then(function(r) { return r.blob(); })
+                        .then(function(blob) {
+                            var a = document.createElement('a');
+                            a.href = URL.createObjectURL(blob);
+                            a.download = filename;
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            URL.revokeObjectURL(a.href);
+                        })
+                        .catch(function(e) { alert('Export failed: ' + (e.message || e)); });
+                },
+                exportBucketIndex: function(name) {
+                    this.downloadBlob('/api/admin/buckets/' + encodeURIComponent(name) + '/export-index', name + '-index.json');
+                },
+                exportBucketZip: function(name) {
+                    this.downloadBlob('/api/admin/buckets/' + encodeURIComponent(name) + '/export-zip', name + '.zip');
+                },
+                openEditBucket: function(b) {
+                    this.editBucket = b;
+                    this.editBucketForm = { name: b.name, path: b.path, is_active: b.is_active, storage_limit_mb: b.storage_limit > 0 ? Math.round(b.storage_limit / 1048576) : 0 };
+                    this.showBucketModal = true;
+                },
+                saveEditBucket: function() {
+                    var self = this;
+                    if (!self.editBucketForm.name) return;
+
+                    authFetch('/api/admin/buckets/edit', {
+                        method: 'PUT',
+                        body: JSON.stringify({ original_name: self.editBucket.name, name: self.editBucketForm.name, path: self.editBucket.path, is_active: self.editBucketForm.is_active, storage_limit: (parseInt(self.editBucketForm.storage_limit_mb) || 0) * 1048576 })
+                    }).then(function(r) {
+                        if (!r.ok) return r.json().then(function(e) { throw e; });
+                        return r.json();
+                    }).then(function() {
+                        self.showBucketModal = false;
+                        self.loadBuckets();
+                        self.loadStats();
+                    }).catch(function(e) { alert(e.detail || e.error || 'Failed to update bucket'); });
+                },
+                createGroup: function() {
+                    var self = this;
+                    if (!self.newGroupName) return;
+                    authFetch('/api/admin/groups', {
+                        method: 'POST',
+                        body: JSON.stringify({ name: self.newGroupName })
+                    }).then(function(r) {
+                        if (r.ok) {
+                            self.newGroupName = '';
+                            self.showAddGroup = false;
+                            self.loadGroups();
+                            self.loadStats();
+                        }
+                        return r.json();
+                    }).catch(function() {});
+                },
+                deleteGroup: function(id, name) {
+                    if (!confirm('Delete group "' + name + '"?')) return;
+                    var self = this;
+                    authFetch('/api/admin/groups/delete', {
+                        method: 'DELETE',
+                        body: JSON.stringify({ id: id })
+                    }).then(function() {
+                        self.loadGroups();
+                        self.loadStats();
+                        self.groupDetail = null;
+                    }).catch(function() {});
+                },
+                viewGroup: function(id) {
+                    var self = this;
+                    self._selectedBuckets = [];
+                    self._bucketSearch = '';
+                    self._memberFilter = '';
+                    authFetch('/api/admin/groups/detail?id=' + encodeURIComponent(id))
+                        .then(function(r) { return r.json(); })
+                        .then(function(d) { self.groupDetail = d; })
+                        .catch(function() {});
+                },
+                openGroupMembers: function(g) {
+                    this.showGroupMembersModal = true;
+                    this.viewGroup(g.id);
+                },
+                openGroupBuckets: function(g) {
+                    this.showGroupBucketsModal = true;
+                    this.viewGroup(g.id);
+                },
+                openGroupPermissions: function(g) {
+                    this.currentGroup = g;
+                    this.showGroupPermissionsModal = true;
+                },
+                removeGroupMember: function(groupId, userId) {
+                    var self = this;
+                    authFetch('/api/admin/groups/members/remove', {
+                        method: 'DELETE',
+                        body: JSON.stringify({ group_id: groupId, user_id: userId })
+                    }).then(function() {
+                        self.viewGroup(groupId);
+                        self.loadGroups();
+                    }).catch(function() {});
+                },
+                filteredGroupMembers: function() {
+                    var self = this;
+                    var q = self._memberFilter.toLowerCase();
+                    if (!self.groupDetail) return [];
+                    return self.groupDetail.members.filter(function(m) {
+                        if (!q) return true;
+                        return m.username.toLowerCase().indexOf(q) >= 0 || m.email.toLowerCase().indexOf(q) >= 0;
+                    });
+                },
+                addGroupBucket: function(groupId, bucketId) {
+                    if (!bucketId) return;
+                    var self = this;
+                    authFetch('/api/admin/groups/buckets', {
+                        method: 'POST',
+                        body: JSON.stringify({ group_id: groupId, bucket_id: bucketId })
+                    }).then(function() {
+                        self.viewGroup(groupId);
+                        self.loadGroups();
+                    }).catch(function() {});
+                },
+                removeGroupBucket: function(groupId, bucketId) {
+                    var self = this;
+                    authFetch('/api/admin/groups/buckets/remove', {
+                        method: 'DELETE',
+                        body: JSON.stringify({ group_id: groupId, bucket_id: bucketId })
+                    }).then(function() {
+                        self.viewGroup(groupId);
+                        self.loadGroups();
+                    }).catch(function() {});
+                },
+                filteredBuckets: function() {
+                    var self = this;
+                    var q = self._bucketSearch.toLowerCase();
+                    var linkedIds = self.groupDetail ? self.groupDetail.buckets.map(function(b) { return b.id; }) : [];
+                    return self.buckets.filter(function(b) {
+                        if (linkedIds.indexOf(b.id) >= 0) return false;
+                        if (!q) return true;
+                        return b.name.toLowerCase().indexOf(q) >= 0;
+                    });
+                },
+                toggleBucketSelect: function(bid) {
+                    var idx = this._selectedBuckets.indexOf(bid);
+                    if (idx >= 0) { this._selectedBuckets.splice(idx, 1); } else { this._selectedBuckets.push(bid); }
+                },
+                addSelectedBuckets: function() {
+                    var self = this;
+                    if (!self.groupDetail || self._selectedBuckets.length === 0) return;
+                    var gid = self.groupDetail.id;
+                    var promises = self._selectedBuckets.map(function(bid) {
+                        return authFetch('/api/admin/groups/buckets', {
+                            method: 'POST',
+                            body: JSON.stringify({ group_id: gid, bucket_id: bid })
+                        });
+                    });
+                    Promise.all(promises).then(function(results) {
+                        var ok = results.every(function(r) { return r.ok; });
+                        if (!ok) {
+                            alert('Failed to add some buckets. Check that the buckets exist and you have admin rights.');
+                            return;
+                        }
+                        self._selectedBuckets = [];
+                        self._bucketSearch = '';
+                        self.viewGroup(gid);
+                        self.loadGroups();
+                    });
+                },
+                toggleBucketPermission: function(bucketId, field, currentVal) {
+                    var self = this;
+                    if (!self.groupDetail) return;
+                    var gid = self.groupDetail.id;
+                    var bucket = self.groupDetail.buckets.find(function(b) { return b.id === bucketId; });
+                    if (!bucket) return;
+                    var newCanUpload = field === 'can_upload' ? !currentVal : bucket.can_upload;
+                    var newCanDownload = field === 'can_download' ? !currentVal : bucket.can_download;
+                    authFetch('/api/admin/groups/buckets/permissions', {
+                        method: 'PATCH',
+                        body: JSON.stringify({ group_id: gid, bucket_id: bucketId, can_upload: newCanUpload, can_download: newCanDownload })
+                    }).then(function() {
+                        self.viewGroup(gid);
+                    }).catch(function() {});
+                },
+                startEditUserLimit: function(bucket) {
+                    this.editingUserLimit = bucket.id;
+                    this.userLimitValue = bucket.user_storage_limit > 0 ? String(Math.round(bucket.user_storage_limit / 1048576)) : '';
+                },
+                saveUserLimit: function(bucketId) {
+                    var self = this;
+                    if (!self.groupDetail) return;
+                    var gid = self.groupDetail.id;
+                    var bytes = (parseInt(self.userLimitValue, 10) || 0) * 1048576;
+                    self.editingUserLimit = null;
+                    authFetch('/api/admin/groups/buckets/user-limit', {
+                        method: 'PUT',
+                        body: JSON.stringify({ group_id: gid, bucket_id: bucketId, user_storage_limit: bytes })
+                    }).then(function() {
+                        self.viewGroup(gid);
+                    }).catch(function() {});
+                },
+                startEditQuota: function(u) {
+                    this.editingQuota = u.id;
+                    this.quotaValue = u.storage_quota > 0 ? String(u.storage_quota) : '';
+                },
+                saveQuota: function(userId) {
+                    var self = this;
+                    var quota = self.quotaValue === '' ? 0 : parseInt(self.quotaValue, 10);
+                    if (isNaN(quota) || quota < 0) return;
+                    authFetch('/api/admin/users/quota', {
+                        method: 'PUT',
+                        body: JSON.stringify({ user_id: userId, storage_quota: quota })
+                    }).then(function() {
+                        self.editingQuota = null;
+                        self.loadUsers();
+                    }).catch(function() {});
+                },
+                openCreateUser: function() {
+                    this.modalMode = 'create';
+                    this.modalForm = { username: '', email: '', password: '', role: 'user', group_ids: [] };
+                    this.groupSearch = '';
+                    this.showModal = true;
+                },
+                openEditUser: function(u) {
+                    this.modalMode = 'edit';
+                    this.modalUser = u;
+                    this.modalForm = { email: u.email, role: u.role, password: '', group_ids: (u.group_ids || []).slice() };
+                    this.groupSearch = '';
+                    this.showModal = true;
+                },
+                filteredUsers: function() {
+                    var self = this;
+                    var q = self._userSearch.toLowerCase();
+                    var role = self._userRoleFilter;
+                    var gid = self._userGroupFilter;
+                    return self.users.filter(function(u) {
+                        if (q) {
+                            var hay = ((u.username || '') + ' ' + (u.email || '')).toLowerCase();
+                            if (hay.indexOf(q) < 0) return false;
+                        }
+                        if (role !== 'all' && u.role !== role) return false;
+                        if (gid) {
+                            var ids = u.group_ids || [];
+                            if (gid === '__none__') {
+                                if (ids.length > 0) return false;
+                            } else if (ids.indexOf(gid) < 0) {
+                                return false;
+                            }
+                        }
+                        return true;
+                    });
+                },
+                visibleUsers: function() {
+                    var filtered = this.filteredUsers();
+                    var limit = parseInt(this._userLimit, 10);
+                    if (!limit || limit <= 0) return filtered;
+                    return filtered.slice(0, limit);
+                },
+                allFilteredSelected: function() {
+                    var self = this;
+                    var filtered = self.filteredUsers();
+                    if (filtered.length === 0) return false;
+                    return filtered.every(function(u) { return self._selectedUserIds.indexOf(u.id) >= 0; });
+                },
+                toggleSelectAllFiltered: function() {
+                    var self = this;
+                    var all = self.allFilteredSelected();
+                    self.filteredUsers().forEach(function(u) {
+                        var idx = self._selectedUserIds.indexOf(u.id);
+                        if (all) { if (idx >= 0) self._selectedUserIds.splice(idx, 1); }
+                        else if (idx < 0) { self._selectedUserIds.push(u.id); }
+                    });
+                },
+                toggleUserSelect: function(uid) {
+                    var idx = this._selectedUserIds.indexOf(uid);
+                    if (idx >= 0) { this._selectedUserIds.splice(idx, 1); } else { this._selectedUserIds.push(uid); }
+                },
+                clearUserSelection: function() {
+                    this._selectedUserIds = [];
+                },
+                openBulkGroups: function() {
+                    this.bulkGroupSearch = '';
+                    this._bulkSelectedGroups = [];
+                    this.showBulkGroupsModal = true;
+                },
+                filteredBulkGroups: function() {
+                    var q = this.bulkGroupSearch.toLowerCase();
+                    if (!q) return this.groups;
+                    return this.groups.filter(function(g) { return g.name.toLowerCase().indexOf(q) >= 0; });
+                },
+                toggleBulkGroup: function(gid) {
+                    var idx = this._bulkSelectedGroups.indexOf(gid);
+                    if (idx >= 0) { this._bulkSelectedGroups.splice(idx, 1); } else { this._bulkSelectedGroups.push(gid); }
+                },
+                submitBulkGroups: function() {
+                    var self = this;
+                    if (self._selectedUserIds.length === 0 || self._bulkSelectedGroups.length === 0) return;
+                    authFetch('/api/admin/groups/members/bulk', {
+                        method: 'POST',
+                        body: JSON.stringify({ user_ids: self._selectedUserIds, group_ids: self._bulkSelectedGroups })
+                    }).then(function(r) {
+                        if (!r.ok) return r.json().then(function(e) { throw e; });
+                        return r.json();
+                    }).then(function(d) {
+                        self.showBulkGroupsModal = false;
+                        self._bulkSelectedGroups = [];
+                        self._selectedUserIds = [];
+                        self.loadUsers();
+                        self.loadGroups();
+                        alert(d.message || 'Group access granted');
+                    }).catch(function(e) { alert(e.error || 'Failed to grant group access'); });
+                },
+                filteredGroups: function() {
+                    var q = this.groupSearch.toLowerCase();
+                    if (!q) return this.groups;
+                    return this.groups.filter(function(g) { return g.name.toLowerCase().indexOf(q) >= 0; });
+                },
+                toggleModalGroup: function(gid) {
+                    var idx = this.modalForm.group_ids.indexOf(gid);
+                    if (idx >= 0) { this.modalForm.group_ids.splice(idx, 1); } else { this.modalForm.group_ids.push(gid); }
+                },
+                submitModal: function() {
+                    var self = this;
+                    if (self.modalMode === 'create') {
+                        if (!self.modalForm.username || !self.modalForm.email || !self.modalForm.password) return;
+                        authFetch('/api/admin/users', {
+                            method: 'POST',
+                            body: JSON.stringify({
+                                username: self.modalForm.username,
+                                email: self.modalForm.email,
+                                password: self.modalForm.password,
+                                role: self.modalForm.role,
+                                group_ids: self.modalForm.group_ids
+                            })
+                        }).then(function(r) {
+                            if (!r.ok) return r.json().then(function(e) { throw e; });
+                            return r.json();
+                        }).then(function() {
+                            self.showModal = false;
+                            self.loadUsers();
+                        }).catch(function(e) { alert(e.error || 'Failed to create user'); });
+                    } else {
+                        var body = { id: self.modalUser.id, email: self.modalForm.email, role: self.modalForm.role, group_ids: self.modalForm.group_ids };
+                        if (self.modalForm.password) body.password = self.modalForm.password;
+                        authFetch('/api/admin/users/update', {
+                            method: 'PUT',
+                            body: JSON.stringify(body)
+                        }).then(function(r) {
+                            if (!r.ok) return r.json().then(function(e) { throw e; });
+                            return r.json();
+                        }).then(function() {
+                            self.showModal = false;
+                            self.loadUsers();
+                        }).catch(function(e) { alert(e.error || 'Failed to update user'); });
+                    }
+                },
+                fmtDate: function(s) {
+                    if (!s) return '-';
+                    var d = new Date(s);
+                    if (isNaN(d.getTime())) return '-';
+                    return d.toLocaleDateString();
+                },
+                fmtBytes: function(b) {
+                    var n = Number(b);
+                    if (!Number.isFinite(n) || n <= 0) return '0 B';
+                    var units = ['B','KB','MB','GB','TB'];
+                    var i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1);
+                    return (b / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+                },
+                get newPathPreview() {
+                    var self = this;
+                    var slug = slugify(self.newPath.name);
+                    if (!slug) return '';
+                    return self.storageBase.env_base + '/' + slug;
+                },
+                get bucketPathPreview() {
+                    var self = this;
+                    if (!self.newBucketPathId || !self.newBucket.name) return '';
+                    var selectedPath = self.storagePaths.find(function(p) { return p.id === self.newBucketPathId; });
+                    if (!selectedPath) return '';
+                    return selectedPath.path + '/' + self.newBucket.name;
+                }
+            };
+        }
+    </script>
+</head>
+<body class="h-full bg-gray-50">
+    <div class="flex h-full" x-data="sidebar()" x-on:keydown.escape.window="closeSidebar()">
+        <div x-show="sidebarOpen" x-cloak class="fixed inset-0 z-30 bg-black/40 lg:hidden" x-on:click="closeSidebar()" style="display:none;"></div>
+        <aside class="fixed inset-y-0 left-0 z-40 w-64 bg-white border-r border-gray-200 flex flex-col shrink-0 transition-transform duration-200 ease-in-out lg:static lg:translate-x-0" :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'">
+            <div class="p-6 border-b border-gray-200">
+                <h1 class="flex items-center gap-2 text-xl font-bold text-gray-900"><img src="/logo.svg" alt="Keystone logo" class="w-7 h-7 shrink-0">Keystone</h1>
+            </div>
+            <nav class="flex-1 p-4 space-y-1">
+                <a href="/" :class="active('/') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" x-on:click="closeSidebar()" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+                    Dashboard
+                </a>
+                <a href="/files" :class="active('/files') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" x-on:click="closeSidebar()" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+                    Files
+                </a>
+                <a href="/account" :class="active('/account') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" x-on:click="closeSidebar()" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                    Account
+                </a>
+                <template x-if="user && user.role === 'admin'">
+                    <a href="/admin?page=overview" :class="active('/admin') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" x-on:click="closeSidebar()" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                        Admin
+                    </a>
+                </template>
+                <template x-if="user && user.role === 'admin'">
+                    <a href="/docs" :class="active('/docs') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" x-on:click="closeSidebar()" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
+                        Documentation
+                    </a>
+                </template>
+            </nav>
+            <div class="p-4 border-t border-gray-200 space-y-3">
+                <div class="flex items-center gap-3">
+                    <div class="w-8 h-8 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-700 font-medium text-sm" x-text="userInitial"></div>
+                    <div class="flex-1 min-w-0">
+                        <p class="text-sm font-medium text-gray-900 truncate" x-text="userName"></p>
+                        <p class="text-xs text-gray-400 truncate" x-text="userEmail"></p>
+                    </div>
+                </div>
+                <div class="flex items-center justify-between px-1">
+                    <span class="text-sm text-gray-600 flex items-center gap-2">
+                        <svg x-show="!themeDark" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+                        <svg x-show="themeDark" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
+                        <span x-text="themeDark ? 'Dark mode' : 'Light mode'"></span>
+                    </span>
+                    <button x-on:click="toggleTheme()" role="switch" :aria-checked="themeDark"
+                        :class="themeDark ? 'bg-indigo-600' : 'bg-gray-300'"
+                        class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none">
+                        <span :class="themeDark ? 'translate-x-4' : 'translate-x-0'"
+                            class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                    </button>
+                </div>
+                <button x-on:click="logout(); closeSidebar()" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-red-600 hover:bg-red-50 transition">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+                    Sign Out
+                </button>
+                <div class="px-1 pt-1 text-xs text-gray-400">Keystone v__KEYSTONE_VERSION__</div>
+            </div>
+        </aside>
+
+        <main class="flex-1 overflow-auto" x-data="adminPanel()" x-init="init()">
+            <div class="lg:hidden flex items-center gap-3 px-4 py-3 bg-white border-b border-gray-200 shrink-0">
+                <button x-on:click="toggleSidebar()" class="p-2 -ml-2 rounded-lg text-gray-600 hover:bg-gray-100 transition" aria-label="Toggle navigation menu">
+                    <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+                </button>
+                <span class="text-base font-semibold text-gray-900">Administration</span>
+            </div>
+            <div class="p-4 sm:p-8">
+                <h2 class="text-2xl font-bold text-gray-900 mb-6">Administration</h2>
+
+                <div class="flex gap-1 mb-6 border-b border-gray-200 flex-wrap">
+                    <button x-on:click="setTab('overview')" :class="tab==='overview' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Overview</button>
+                    <button x-on:click="setTab('paths')" :class="tab==='paths' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Paths</button>
+                    <button x-on:click="setTab('buckets')" :class="tab==='buckets' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Buckets</button>
+                    <button x-on:click="setTab('groups')" :class="tab==='groups' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Groups</button>
+                    <button x-on:click="setTab('users')" :class="tab==='users' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Users</button>
+                    <button x-on:click="setTab('settings')" :class="tab==='settings' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Settings</button>
+                </div>
+
+                <!-- Overview Tab -->
+                <div x-show="tab==='overview'" class="space-y-6">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                            <p class="text-sm text-gray-500">Total Users</p>
+                            <p class="text-3xl font-bold text-gray-900 mt-1" x-text="stats.total_users"></p>
+                        </div>
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                            <p class="text-sm text-gray-500">Buckets</p>
+                            <p class="text-3xl font-bold text-gray-900 mt-1" x-text="stats.total_buckets"></p>
+                        </div>
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                            <p class="text-sm text-gray-500">Groups</p>
+                            <p class="text-3xl font-bold text-gray-900 mt-1" x-text="stats.total_groups"></p>
+                        </div>
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                            <p class="text-sm text-gray-500">Physical Files</p>
+                            <p class="text-3xl font-bold text-gray-900 mt-1" x-text="stats.total_files"></p>
+                            <p class="text-xs text-gray-400 mt-1">Content-addressed blobs</p>
+                        </div>
+                    </div>
+                    <!-- File Stats -->
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6">
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                            <div class="flex items-center gap-2 mb-2">
+                                <div class="w-2.5 h-2.5 bg-green-500 rounded-full"></div>
+                                <p class="text-sm font-medium text-gray-600">Active Files</p>
+                            </div>
+                            <p class="text-3xl font-bold text-gray-900 mt-1" x-text="stats.active_user_files"></p>
+                            <p class="text-sm text-gray-500 mt-1" x-text="fmtBytes(stats.active_user_files_size)"></p>
+                        </div>
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                            <div class="flex items-center gap-2 mb-2">
+                                <div class="w-2.5 h-2.5 bg-amber-500 rounded-full"></div>
+                                <p class="text-sm font-medium text-gray-600">Deleted by Users</p>
+                            </div>
+                            <p class="text-3xl font-bold text-amber-600 mt-1" x-text="stats.deleted_user_files"></p>
+                            <p class="text-sm text-gray-500 mt-1" x-text="fmtBytes(stats.deleted_user_files_size) + ' still on disk'"></p>
+                        </div>
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                            <div class="flex items-center gap-2 mb-2">
+                                <div class="w-2.5 h-2.5 bg-red-500 rounded-full"></div>
+                                <p class="text-sm font-medium text-gray-600">Orphaned (Wasted)</p>
+                            </div>
+                            <p class="text-3xl font-bold text-red-600 mt-1" x-text="stats.orphaned_physical_files"></p>
+                            <p class="text-sm text-gray-500 mt-1" x-text="fmtBytes(stats.orphaned_physical_files_size) + ' unused'"></p>
+                            <p class="text-xs text-red-400 mt-1">No user can access these files</p>
+                        </div>
+                    </div>
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                        <h3 class="text-lg font-semibold text-gray-900 mb-4">Platform Info</h3>
+                        <dl class="grid grid-cols-2 gap-4 text-sm">
+                            <div>
+                                <dt class="text-gray-500">Registrations</dt>
+                                <dd class="mt-1 font-medium" x-text="stats.block_registrations ? 'Blocked' : 'Open'"></dd>
+                            </div>
+                        </dl>
+                    </div>
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                        <h3 class="text-lg font-semibold text-gray-900 mb-4">Storage Backends</h3>
+                        <div class="space-y-2">
+                            <template x-for="b in backends" :key="b">
+                                <div class="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
+                                    <div class="w-2 h-2 bg-green-500 rounded-full"></div>
+                                    <span class="text-sm font-medium text-gray-900" x-text="b"></span>
+                                </div>
+                            </template>
+                            <p x-show="backends.length === 0" class="text-sm text-gray-400">No backends loaded</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Paths Tab -->
+                <div x-show="tab==='paths'" class="space-y-6">
+                    <div class="flex items-center justify-between">
+                        <p class="text-sm text-gray-500">Manage storage paths. Assign them to buckets when creating.</p>
+                        <button x-on:click="showAddPath = true" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition">
+                            Add Path
+                        </button>
+                    </div>
+
+                    <!-- Add Path Modal -->
+                    <div x-show="showAddPath" x-cloak class="fixed inset-0 z-50 flex items-center justify-center" style="display:none;">
+                        <div class="fixed inset-0 bg-black/40" x-on:click="showAddPath = false"></div>
+                        <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] flex flex-col">
+                            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                                <h3 class="text-lg font-semibold text-gray-900">New Storage Path</h3>
+                                <button x-on:click="showAddPath = false" class="text-gray-400 hover:text-gray-600">
+                                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                                </button>
+                            </div>
+                            <div class="px-6 py-4 space-y-4 overflow-y-auto flex-1">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                                    <input type="text" x-model="newPath.name" placeholder="e.g. Primary Storage"
+                                        class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                                </div>
+                                <div x-show="newPathPreview" class="bg-gray-50 rounded-lg px-3 py-2">
+                                    <p class="text-xs text-gray-500 font-mono">Path will be: <span x-text="newPathPreview"></span></p>
+                                </div>
+                                <p class="text-xs text-gray-400">Created under the first STORAGE_LOCAL_PATHS directory.</p>
+                            </div>
+                            <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-2">
+                                <button x-on:click="showAddPath = false" class="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition">Cancel</button>
+                                <button x-on:click="createStoragePath()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition">Create Path</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Paths Table -->
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200">
+                        <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead>
+                                <tr class="text-left text-gray-500 border-b border-gray-100">
+                                    <th class="px-4 py-3 font-medium">Name</th>
+                                    <th class="px-4 py-3 font-medium">Path</th>
+                                    <th class="px-4 py-3 font-medium text-center">Buckets</th>
+                                    <th class="px-4 py-3 font-medium text-center">Files</th>
+                                    <th class="px-4 py-3 font-medium">Total Size</th>
+                                    <th class="px-4 py-3 font-medium text-right">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-100">
+                                <template x-for="p in storagePaths" :key="p.id">
+                                    <tr>
+                                        <td class="px-4 py-3 font-medium text-gray-900" x-text="p.name"></td>
+                                        <td class="px-4 py-3 text-gray-500 font-mono text-xs" x-text="p.path"></td>
+                                        <td class="px-4 py-3 text-center">
+                                            <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 text-xs font-medium" x-text="p.bucket_count"></span>
+                                        </td>
+                                        <td class="px-4 py-3 text-center">
+                                            <span class="inline-flex items-center justify-center min-w-[24px] px-2 h-6 rounded-full text-xs font-medium"
+                                                :class="p.file_count > 0 ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'"
+                                                x-text="p.file_count.toLocaleString()"></span>
+                                        </td>
+                                        <td class="px-4 py-3 text-xs text-gray-500" x-text="fmtBytes(p.total_size)"></td>
+                                        <td class="px-4 py-3 text-right">
+                                            <button x-on:click="deleteStoragePath(p.id, p.name)" class="text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
+                                        </td>
+                                    </tr>
+                                </template>
+                                <tr x-show="storagePaths.length === 0">
+                                    <td colspan="6" class="px-4 py-8 text-center text-gray-400">No storage paths configured</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        </div>
+                    </div>
+
+                </div>
+
+                <!-- Buckets Tab -->
+                <div x-show="tab==='buckets'" class="space-y-6">
+                    <div class="flex items-center justify-between">
+                        <p class="text-sm text-gray-500">Manage storage paths.</p>
+                        <button x-on:click="showAddBucket = true" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition">
+                            Add Bucket
+                        </button>
+                    </div>
+
+                    <!-- Add Bucket Modal -->
+                    <div x-show="showAddBucket" x-cloak class="fixed inset-0 z-50 flex items-center justify-center" style="display:none;">
+                        <div class="fixed inset-0 bg-black/40" x-on:click="showAddBucket = false"></div>
+                        <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] flex flex-col">
+                            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                                <h3 class="text-lg font-semibold text-gray-900">New Bucket</h3>
+                                <button x-on:click="showAddBucket = false" class="text-gray-400 hover:text-gray-600">
+                                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                                </button>
+                            </div>
+                            <div class="px-6 py-4 space-y-4 overflow-y-auto flex-1">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                                    <input type="text" x-model="newBucket.name" placeholder="e.g. media"
+                                        class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Storage Path</label>
+                                    <select x-model="newBucketPathId" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                                        <option value="">-- Select a path --</option>
+                                        <template x-for="p in storagePaths" :key="p.id">
+                                            <option :value="p.id" x-text="p.name + ' (' + p.path + ')'"></option>
+                                        </template>
+                                    </select>
+                                    <p x-show="newBucketPathId && newBucket.name" class="text-xs text-gray-500 font-mono bg-gray-50 rounded-lg px-3 py-2 mt-2">
+                                        Bucket files will be stored at: <span x-text="bucketPathPreview"></span>
+                                    </p>
+                                    <p x-show="storagePaths.length === 0" class="text-xs text-amber-600 mt-1">No paths configured. <a x-on:click.prevent="setTab('paths'); showAddBucket = false" href="#" class="underline">Create one first</a>.</p>
+                                </div>
+                            </div>
+                            <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-2">
+                                <button x-on:click="showAddBucket = false" class="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition">Cancel</button>
+                                <button x-on:click="addBucket()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition">Create Bucket</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200">
+                        <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead>
+                                <tr class="text-left text-gray-500 border-b border-gray-100">
+                                    <th class="px-4 py-3 font-medium">Name</th>
+                                    <th class="px-4 py-3 font-medium">Path</th>
+                                    <th class="px-4 py-3 font-medium">Storage</th>
+                                    <th class="px-4 py-3 font-medium">Deleted</th>
+                                    <th class="px-4 py-3 font-medium">Orphaned</th>
+                                    <th class="px-4 py-3 font-medium">Status</th>
+                                    <th class="px-4 py-3 font-medium text-right">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-100">
+                                <template x-for="b in buckets" :key="b.id">
+                                    <tr :id="'bucket-' + b.name">
+                                        <td class="px-4 py-3">
+                                            <span class="font-medium text-gray-900" x-text="b.name"></span>
+                                        </td>
+                                        <td class="px-4 py-3 text-gray-500 font-mono text-xs" x-text="b.path"></td>
+                                        <td class="px-4 py-3 text-xs">
+                                            <span class="text-gray-900 font-medium" x-text="fmtBytes(b.storage_used)"></span>
+                                            <template x-if="b.storage_limit > 0">
+                                                <span class="text-gray-400"> / <span x-text="fmtBytes(b.storage_limit)"></span></span>
+                                            </template>
+                                            <template x-if="b.storage_limit <= 0">
+                                                <span class="text-gray-400"> / unlimited</span>
+                                            </template>
+                                        </td>
+                                        <td class="px-4 py-3 text-xs">
+                                            <template x-if="b.deleted_files > 0">
+                                                <div>
+                                                    <span class="text-amber-600 font-medium" x-text="b.deleted_files + ' file' + (b.deleted_files === 1 ? '' : 's')"></span>
+                                                    <span class="text-gray-400" x-text="' (' + fmtBytes(b.deleted_files_size) + ')'"></span>
+                                                </div>
+                                            </template>
+                                            <template x-if="b.deleted_files === 0">
+                                                <span class="text-gray-400">None</span>
+                                            </template>
+                                        </td>
+                                        <td class="px-4 py-3 text-xs">
+                                            <template x-if="b.orphaned_files > 0">
+                                                <div>
+                                                    <span class="text-red-600 font-medium" x-text="b.orphaned_files + ' file' + (b.orphaned_files === 1 ? '' : 's')"></span>
+                                                    <span class="text-gray-400" x-text="' (' + fmtBytes(b.orphaned_files_size) + ')'"></span>
+                                                </div>
+                                            </template>
+                                            <template x-if="b.orphaned_files === 0">
+                                                <span class="text-gray-400">None</span>
+                                            </template>
+                                        </td>
+                                        <td class="px-4 py-3">
+                                            <span :class="b.is_active ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'" class="px-2 py-0.5 rounded-full text-xs font-medium" x-text="b.is_active ? 'Active' : 'Inactive'"></span>
+                                        </td>
+                                        <td class="px-4 py-3 text-right">
+                                            <div class="flex items-center justify-end gap-1">
+                                                <button x-on:click="openExportModal(b.name)" class="text-xs text-indigo-600 hover:text-indigo-800 font-medium" title="Export bucket data">Export</button>
+                                                <button x-on:click="openImportModal(b.name)" class="text-xs text-indigo-600 hover:text-indigo-800 font-medium" title="Import files into bucket">Import</button>
+                                                <button x-on:click="openEditBucket(b)" class="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
+                                                <button x-on:click="deleteBucket(b.name)" class="text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </template>
+                                <tr x-show="buckets.length === 0">
+                                    <td colspan="7" class="px-4 py-8 text-center text-gray-400">No buckets configured</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        </div>
+                    </div>
+
+                    <!-- Edit Bucket Modal -->
+                    <div x-show="showBucketModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center" style="display:none;">
+                        <div class="fixed inset-0 bg-black/40" x-on:click="showBucketModal = false"></div>
+                        <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4">
+                            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                                <h3 class="text-lg font-semibold text-gray-900">Edit Bucket</h3>
+                                <button x-on:click="showBucketModal = false" class="text-gray-400 hover:text-gray-600">
+                                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                                </button>
+                            </div>
+                            <div class="px-6 py-4 space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                                    <input type="text" x-model="editBucketForm.name" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Path</label>
+                                    <input type="text" x-model="editBucketForm.path" readonly class="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm font-mono bg-gray-50 text-gray-500 cursor-not-allowed">
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <label class="text-sm font-medium text-gray-700">Active</label>
+                                    <button x-on:click="editBucketForm.is_active = !editBucketForm.is_active"
+                                        :class="editBucketForm.is_active ? 'bg-indigo-600' : 'bg-gray-300'"
+                                        class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none">
+                                        <span :class="editBucketForm.is_active ? 'translate-x-4' : 'translate-x-0'"
+                                            class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                                    </button>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Storage Limit (MB, 0 = unlimited)</label>
+                                    <input type="number" x-model.number="editBucketForm.storage_limit_mb" min="0"
+                                        class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500" placeholder="0">
+                                </div>
+                            </div>
+                            <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-2">
+                                <button x-on:click="showBucketModal = false" class="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition">Cancel</button>
+                                <button x-on:click="saveEditBucket()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition">Save Changes</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Export Bucket Modal -->
+                    <div x-show="showExportModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center" style="display:none;">
+                        <div class="fixed inset-0 bg-black/40" x-on:click="showExportModal = false"></div>
+                        <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4">
+                            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                                <h3 class="text-lg font-semibold text-gray-900">Export Bucket</h3>
+                                <button x-on:click="showExportModal = false" class="text-gray-400 hover:text-gray-600">
+                                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                                </button>
+                            </div>
+                            <div class="px-6 py-4 space-y-6">
+                                <p class="text-sm text-gray-500">
+                                    Choose an export format for bucket <span class="font-medium text-gray-900" x-text="exportBucketName"></span>.
+                                </p>
+
+                                <!-- Part 1: Indexer -->
+                                <div class="rounded-xl border border-indigo-200 bg-indigo-50/30 p-4">
+                                    <div class="flex items-start gap-3">
+                                        <div class="shrink-0 w-10 h-10 rounded-lg bg-indigo-100 flex items-center justify-center">
+                                            <svg class="w-5 h-5 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                                        </div>
+                                        <div class="flex-1 min-w-0">
+                                            <h4 class="text-sm font-semibold text-gray-900">Indexer</h4>
+                                            <p class="text-xs text-gray-500 mt-0.5">Export all file &amp; folder metadata as a structured JSON document.</p>
+                                            <div class="mt-3">
+                                                <button x-on:click="exportBucketIndex(exportBucketName); showExportModal = false;"
+                                                    class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 transition">
+                                                    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                                                    Download Index JSON
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Part 2: ZIP File -->
+                                <div class="rounded-xl border border-amber-200 bg-amber-50/30 p-4">
+                                    <div class="flex items-start gap-3">
+                                        <div class="shrink-0 w-10 h-10 rounded-lg bg-amber-100 flex items-center justify-center">
+                                            <svg class="w-5 h-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                                        </div>
+                                        <div class="flex-1 min-w-0">
+                                            <h4 class="text-sm font-semibold text-gray-900">ZIP File</h4>
+                                            <p class="text-xs text-gray-500 mt-0.5">Download all files organised as <span class="font-mono text-gray-600">bucket/username/folder/...</span>.</p>
+                                            <div class="mt-3">
+                                                <button x-on:click="exportBucketZip(exportBucketName); showExportModal = false;"
+                                                    class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-amber-600 hover:bg-amber-700 transition">
+                                                    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                                                    Download ZIP Archive
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="px-6 py-4 border-t border-gray-100 flex justify-end">
+                                <button x-on:click="showExportModal = false" class="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition">Close</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Import Bucket Modal -->
+                    <div x-show="showImportModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center" style="display:none;">
+                        <div class="fixed inset-0 bg-black/40" x-on:click="showImportModal = false"></div>
+                        <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4">
+                            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                                <h3 class="text-lg font-semibold text-gray-900">Import into Bucket</h3>
+                                <button x-on:click="showImportModal = false" class="text-gray-400 hover:text-gray-600">
+                                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                                </button>
+                            </div>
+                            <div class="px-6 py-4">
+                                <p class="text-sm text-gray-500 mb-4">
+                                    Import files into bucket <span class="font-medium text-gray-900" x-text="importBucketName"></span>.
+                                </p>
+
+                                <!-- Combined Import: ZIP + JSON -->
+                                <div class="space-y-4">
+                                    <p class="text-xs text-gray-500">
+                                        Upload the exported files (<span class="font-mono text-gray-600">.zip</span>) and the indexer JSON (<span class="font-mono text-gray-600">.json</span>) together. The ZIP should contain all files organised as <span class="font-mono text-gray-600">bucket_name/username/path/to/file.ext</span> (same as the export format). The JSON index defines the folder structure and user-file associations.
+                                    </p>
+                                    <div>
+                                        <label class="block text-xs font-medium text-gray-700 mb-1">ZIP file <span class="text-gray-400">(file data)</span></label>
+                                        <input id="importZipInput" type="file" accept=".zip" class="block w-full text-sm text-gray-600 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-medium text-gray-700 mb-1">JSON index file <span class="text-gray-400">(structure &amp; metadata)</span></label>
+                                        <input id="importJsonInput" type="file" accept=".json" class="block w-full text-sm text-gray-600 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100">
+                                    </div>
+                                    <div class="flex justify-end">
+                                        <button x-on:click="importCombined()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition">Import into Bucket</button>
+                                    </div>
+                                    <div x-show="importCombinedStatus" class="text-sm" :class="importCombinedStatus.startsWith('Error') ? 'text-red-600' : 'text-green-600'" x-text="importCombinedStatus"></div>
+                                </div>
+                            </div>
+                            <div class="px-6 py-4 border-t border-gray-100 flex justify-end">
+                                <button x-on:click="showImportModal = false" class="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition">Close</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Groups Tab -->
+                <div x-show="tab==='groups'" class="space-y-6">
+                    <div class="flex items-center justify-between">
+                        <p class="text-sm text-gray-500">Groups control which users can access private buckets.</p>
+                        <button x-on:click="showAddGroup = !showAddGroup" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition">
+                            Add Group
+                        </button>
+                    </div>
+
+                    <!-- Groups Table -->
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200">
+                        <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead>
+                                <tr class="text-left text-gray-500 border-b border-gray-100">
+                                    <th class="px-4 py-3 font-medium">Name</th>
+                                    <th class="px-4 py-3 font-medium">Members</th>
+                                    <th class="px-4 py-3 font-medium">Buckets</th>
+                                    <th class="px-4 py-3 font-medium text-right">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-100">
+                                <template x-for="g in groups" :key="g.id">
+                                    <tr>
+                                        <td class="px-4 py-3 font-medium text-gray-900" x-text="g.name"></td>
+                                        <td class="px-4 py-3 text-gray-500" x-text="g.member_count"></td>
+                                        <td class="px-4 py-3 text-gray-500" x-text="g.bucket_count"></td>
+                                        <td class="px-4 py-3 text-right">
+                                            <div class="flex items-center justify-end gap-2">
+                                                <button x-on:click="openGroupMembers(g)" class="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Members</button>
+                                                <button x-on:click="openGroupBuckets(g)" class="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Buckets</button>
+                                                <button x-on:click="openGroupPermissions(g)" class="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Permissions</button>
+                                                <button x-on:click="deleteGroup(g.id, g.name)" class="text-xs text-red-600 hover:text-red-800 font-medium">Delete</button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </template>
+                                <tr x-show="groups.length === 0">
+                                    <td colspan="4" class="px-4 py-8 text-center text-gray-400">No groups</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        </div>
+                    </div>
+
+                    <!-- Group Members Modal -->
+                    <div x-show="showGroupMembersModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center" style="display:none;">
+                        <div class="fixed inset-0 bg-black/40" x-on:click="showGroupMembersModal = false"></div>
+                        <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] flex flex-col">
+                            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                                <div>
+                                    <h3 class="text-lg font-semibold text-gray-900">Group Members</h3>
+                                    <p class="text-xs text-gray-500" x-text="groupDetail ? groupDetail.name : ''"></p>
+                                </div>
+                                <button x-on:click="showGroupMembersModal = false" class="text-gray-400 hover:text-gray-600">
+                                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                                </button>
+                            </div>
+                            <div class="px-6 py-4 space-y-4 overflow-y-auto flex-1">
+                                <!-- Search filter -->
+                                <div class="relative">
+                                    <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                                    <input type="text" x-model="_memberFilter" placeholder="Filter members..."
+                                        class="w-full rounded-lg border border-gray-200 pl-10 pr-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-gray-50">
+                                </div>
+                                <!-- Members list -->
+                                <div class="space-y-1">
+                                    <template x-for="m in filteredGroupMembers()" :key="m.id">
+                                        <div class="flex items-center justify-between p-2.5 bg-gray-50 rounded-lg hover:bg-gray-100 transition">
+                                            <div class="flex items-center gap-3 min-w-0">
+                                                <div class="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
+                                                    <span class="text-sm font-medium text-indigo-700" x-text="m.username.charAt(0).toUpperCase()"></span>
+                                                </div>
+                                                <div class="min-w-0">
+                                                    <span class="text-sm font-medium text-gray-900 block truncate" x-text="m.username"></span>
+                                                    <span class="text-xs text-gray-400 block truncate" x-text="m.email"></span>
+                                                </div>
+                                            </div>
+                                            <button x-on:click="removeGroupMember(groupDetail.id, m.id)" class="text-xs text-red-600 hover:text-red-800 font-medium shrink-0 ml-2">Remove</button>
+                                        </div>
+                                    </template>
+                                    <p x-show="!groupDetail || filteredGroupMembers().length === 0" class="text-sm text-gray-400 text-center py-4">No members found</p>
+                                </div>
+                            </div>
+                            <div class="px-6 py-4 border-t border-gray-100 flex justify-between items-center">
+                                <span class="text-xs text-gray-400" x-text="groupDetail ? groupDetail.members.length + ' member(s)' : ''"></span>
+                                <button x-on:click="showGroupMembersModal = false" class="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition">Close</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Group Buckets Modal -->
+                    <div x-show="showGroupBucketsModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center" style="display:none;">
+                        <div class="fixed inset-0 bg-black/40" x-on:click="showGroupBucketsModal = false"></div>
+                        <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-6xl mx-4 max-h-[90vh] flex flex-col">
+                            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                                <div>
+                                    <h3 class="text-lg font-semibold text-gray-900">Group Buckets</h3>
+                                    <p class="text-xs text-gray-500" x-text="groupDetail ? groupDetail.name : ''"></p>
+                                </div>
+                                <button x-on:click="showGroupBucketsModal = false" class="text-gray-400 hover:text-gray-600">
+                                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                                </button>
+                            </div>
+                            <div class="px-6 py-4 space-y-4 overflow-y-auto flex-1">
+                                <!-- Add buckets list (all non-linked buckets, scrollable, filterable) -->
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Add Buckets</label>
+                                    <div class="border border-gray-200 rounded-lg overflow-hidden">
+                                        <div class="px-3 py-2 border-b border-gray-100 bg-gray-50 flex items-center gap-2">
+                                            <svg class="w-4 h-4 text-gray-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                                            <input type="text" x-model="_bucketSearch" placeholder="Filter buckets..."
+                                                class="w-full text-xs bg-transparent border-0 p-0 focus:ring-0 focus:outline-none">
+                                            <span x-show="_selectedBuckets.length > 0" class="text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded-full font-medium" x-text="_selectedBuckets.length + ' selected'"></span>
+                                        </div>
+                                        <div class="max-h-64 overflow-y-auto divide-y divide-gray-50">
+                                            <template x-for="b in filteredBuckets()" :key="b.id">
+                                                <label class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-50 transition">
+                                                    <input type="checkbox" :checked="_selectedBuckets.indexOf(b.id) >= 0"
+                                                        x-on:change="toggleBucketSelect(b.id)"
+                                                        class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 accent-indigo-600">
+                                                    <div class="flex-1 min-w-0">
+                                                        <span class="text-sm text-gray-900 block truncate" x-text="b.name"></span>
+                                                        <span class="text-[10px] text-gray-400 block truncate font-mono" x-text="b.path"></span>
+                                                    </div>
+                                                </label>
+                                            </template>
+                                            <p x-show="filteredBuckets().length === 0" class="px-3 py-3 text-xs text-gray-400 text-center">No buckets available</p>
+                                        </div>
+                                    </div>
+                                    <button x-on:click="addSelectedBuckets()" x-show="_selectedBuckets.length > 0"
+                                        class="w-full bg-indigo-600 text-white px-3 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition mt-2">
+                                        Add <span x-text="_selectedBuckets.length"></span> Bucket<span x-show="_selectedBuckets.length > 1">s</span>
+                                    </button>
+                                </div>
+                                <!-- Linked buckets table -->
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Linked Buckets</label>
+                                    <div x-show="groupDetail && groupDetail.buckets.length > 0" class="border border-gray-200 rounded-lg overflow-hidden">
+                                        <div class="overflow-x-auto">
+                                        <table class="w-full text-sm">
+                                            <thead>
+                                                <tr class="text-left text-gray-500 bg-gray-50 border-b border-gray-100">
+                                                    <th class="px-3 py-2 font-medium">Name</th>
+                                                    <th class="px-3 py-2 font-medium">Path</th>
+                                                    <th class="px-3 py-2 font-medium text-center">Upload</th>
+                                                    <th class="px-3 py-2 font-medium text-center">Download</th>
+                                                    <th class="px-3 py-2 font-medium text-right">Users</th>
+                                                    <th class="px-3 py-2 font-medium text-right">Used</th>
+                                                    <th class="px-3 py-2 font-medium text-right">Limit</th>
+                                                    <th class="px-3 py-2 font-medium text-right">User Limit (MB)</th>
+                                                    <th class="px-3 py-2 font-medium text-right">Action</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody class="divide-y divide-gray-100">
+                                                <template x-for="b in (groupDetail ? groupDetail.buckets : [])" :key="b.id">
+                                                    <tr class="hover:bg-gray-50 transition">
+                                                        <td class="px-3 py-2 font-medium text-gray-900" x-text="b.name"></td>
+                                                        <td class="px-3 py-2 text-gray-500 font-mono text-xs" x-text="b.path"></td>
+                                                        <td class="px-3 py-2 text-center">
+                                                            <button x-on:click="toggleBucketPermission(b.id, 'can_upload', b.can_upload)"
+                                                                :class="b.can_upload ? 'bg-indigo-600' : 'bg-gray-300'"
+                                                                class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none">
+                                                                <span :class="b.can_upload ? 'translate-x-4' : 'translate-x-0'"
+                                                                    class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                                                            </button>
+                                                        </td>
+                                                        <td class="px-3 py-2 text-center">
+                                                            <button x-on:click="toggleBucketPermission(b.id, 'can_download', b.can_download)"
+                                                                :class="b.can_download ? 'bg-indigo-600' : 'bg-gray-300'"
+                                                                class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none">
+                                                                <span :class="b.can_download ? 'translate-x-4' : 'translate-x-0'"
+                                                                    class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                                                            </button>
+                                                        </td>
+                                                        <td class="px-3 py-2 text-gray-600 text-right">
+                                                            <span class="inline-flex items-center gap-1">
+                                                                <svg class="w-3.5 h-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                                                                <span x-text="b.user_count"></span>
+                                                            </span>
+                                                        </td>
+                                                        <td class="px-3 py-2 text-gray-600 text-right" x-text="b.storage_used === 0 ? '0 B' : fmtBytes(b.storage_used)"></td>
+                                                        <td class="px-3 py-2 text-gray-600 text-right" x-text="b.storage_limit === 0 ? 'Unlimited' : fmtBytes(b.storage_limit)"></td>
+                                                        <td class="px-3 py-2 text-right">
+                                                            <template x-if="editingUserLimit === b.id">
+                                                                <span class="inline-flex items-center gap-1">
+                                                                    <input x-model="userLimitValue" type="number" min="0" placeholder="0=unlimited"
+                                                                        x-on:keydown.enter="saveUserLimit(b.id)"
+                                                                        x-on:keydown.escape="editingUserLimit = null"
+                                                                        class="w-20 text-xs border border-gray-300 rounded px-1.5 py-1 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                                                                        x-ref="userLimitInput" x-init="$nextTick(() => $refs.userLimitInput && $refs.userLimitInput.focus())">
+                                                                    <button x-on:click="saveUserLimit(b.id)" class="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Save</button>
+                                                                </span>
+                                                            </template>
+                                                            <template x-if="editingUserLimit !== b.id">
+                                                                <button x-on:click="startEditUserLimit(b)" class="text-xs text-indigo-600 hover:text-indigo-800 font-medium" x-text="b.user_storage_limit === 0 ? 'Set limit' : fmtBytes(b.user_storage_limit)"></button>
+                                                            </template>
+                                                        </td>
+                                                        <td class="px-3 py-2 text-right">
+                                                            <button x-on:click="removeGroupBucket(groupDetail.id, b.id)" class="text-xs text-red-600 hover:text-red-800 font-medium">Remove</button>
+                                                        </td>
+                                                    </tr>
+                                                </template>
+                                            </tbody>
+                                        </table>
+                                        </div>
+                                    </div>
+                                    <p x-show="!groupDetail || groupDetail.buckets.length === 0" class="text-sm text-gray-400 text-center py-4">No buckets linked</p>
+                                </div>
+                            </div>
+                            <div class="px-6 py-4 border-t border-gray-100 flex justify-between items-center">
+                                <span class="text-xs text-gray-400" x-text="groupDetail ? groupDetail.buckets.length + ' bucket(s)' : ''"></span>
+                                <button x-on:click="showGroupBucketsModal = false" class="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition">Close</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Group Permissions Modal -->
+                    <div x-show="showGroupPermissionsModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center" style="display:none;">
+                        <div class="fixed inset-0 bg-black/40" x-on:click="showGroupPermissionsModal = false"></div>
+                        <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 max-h-[90vh] flex flex-col">
+                            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                                <div>
+                                    <h3 class="text-lg font-semibold text-gray-900">Group Permissions</h3>
+                                    <p class="text-xs text-gray-500" x-text="currentGroup ? currentGroup.name : ''"></p>
+                                </div>
+                                <button x-on:click="showGroupPermissionsModal = false" class="text-gray-400 hover:text-gray-600">
+                                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                                </button>
+                            </div>
+                            <div class="px-6 py-4 space-y-4 overflow-y-auto flex-1">
+                                <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                                    <div>
+                                        <p class="text-sm font-medium text-gray-900">Allow API Keys</p>
+                                        <p class="text-xs text-gray-400">Let members of this group create API keys</p>
+                                    </div>
+                                    <button x-on:click="toggleGroupApiKeys(currentGroup)"
+                                        :class="currentGroup && currentGroup.allow_api_keys ? 'bg-indigo-600' : 'bg-gray-300'"
+                                        class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
+                                        :title="currentGroup && currentGroup.allow_api_keys ? 'Allow API Keys' : 'Disallow API Keys'">
+                                        <span :class="currentGroup && currentGroup.allow_api_keys ? 'translate-x-4' : 'translate-x-0'" class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                                    </button>
+                                </div>
+                                <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                                    <div>
+                                        <p class="text-sm font-medium text-gray-900">Allow Password Change</p>
+                                        <p class="text-xs text-gray-400">Let members of this group change their password</p>
+                                    </div>
+                                    <button x-on:click="toggleGroupPasswordChange(currentGroup)"
+                                        :class="currentGroup && currentGroup.allow_password_change ? 'bg-indigo-600' : 'bg-gray-300'"
+                                        class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
+                                        :title="currentGroup && currentGroup.allow_password_change ? 'Allow Password Change' : 'Disallow Password Change'">
+                                        <span :class="currentGroup && currentGroup.allow_password_change ? 'translate-x-4' : 'translate-x-0'" class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="px-6 py-4 border-t border-gray-100 flex justify-end">
+                                <button x-on:click="showGroupPermissionsModal = false" class="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition">Close</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Create Group Modal -->
+                <div x-show="showAddGroup" x-cloak class="fixed inset-0 z-50 flex items-center justify-center" style="display:none;">
+                    <div class="fixed inset-0 bg-black/40" x-on:click="showAddGroup = false"></div>
+                    <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] flex flex-col">
+                        <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                            <h3 class="text-lg font-semibold text-gray-900">New Group</h3>
+                            <button x-on:click="showAddGroup = false" class="text-gray-400 hover:text-gray-600">
+                                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                            </button>
+                        </div>
+                        <div class="px-6 py-4 space-y-4 overflow-y-auto flex-1">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Group Name</label>
+                                <input type="text" x-model="newGroupName" placeholder="e.g. media-team"
+                                    class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                            </div>
+                        </div>
+                        <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-2">
+                            <button x-on:click="showAddGroup = false" class="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition">Cancel</button>
+                            <button x-on:click="createGroup()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition">Create Group</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Users Tab -->
+                <div x-show="tab==='users'" class="space-y-6">
+                    <div class="flex items-center justify-between">
+                        <p class="text-sm text-gray-500">Manage platform users, roles, and group memberships.</p>
+                        <button x-on:click="openCreateUser()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition">
+                            Create User
+                        </button>
+                    </div>
+
+                    <!-- Users filters + bulk actions -->
+                    <div class="flex flex-wrap items-center gap-3">
+                        <div class="relative">
+                            <svg class="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                            <input type="text" x-model="_userSearch" placeholder="Search username or email..."
+                                class="pl-9 pr-3 py-2 rounded-lg border border-gray-300 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 w-64">
+                        </div>
+                        <select x-model="_userRoleFilter" class="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                            <option value="all">All roles</option>
+                            <option value="user">Users</option>
+                            <option value="admin">Admins</option>
+                            <option value="service">Service</option>
+                        </select>
+                        <select x-model="_userGroupFilter" class="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 max-w-56">
+                            <option value="">All groups</option>
+                            <option value="__none__">No group</option>
+                            <template x-for="g in groups" :key="g.id">
+                                <option :value="g.id" x-text="g.name"></option>
+                            </template>
+                        </select>
+                        <div class="flex items-center gap-2">
+                            <span class="text-xs text-gray-400">Show</span>
+                            <select x-model="_userLimit" class="rounded-lg border border-gray-300 px-2 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                                <option value="25">25</option>
+                                <option value="50">50</option>
+                                <option value="100">100</option>
+                                <option value="all">All</option>
+                            </select>
+                        </div>
+                        <div class="flex-1"></div>
+                        <button x-on:click="clearUserSelection()" x-show="_selectedUserIds.length > 0"
+                            class="px-3 py-2 rounded-lg text-sm font-medium text-gray-500 hover:bg-gray-100 transition">Clear</button>
+                        <button x-on:click="openBulkGroups()" :disabled="_selectedUserIds.length === 0"
+                            :class="_selectedUserIds.length > 0 ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'bg-gray-200 text-gray-400 cursor-not-allowed'"
+                            class="px-4 py-2 rounded-lg text-sm font-medium transition">
+                            Give Group Access (<span x-text="_selectedUserIds.length"></span>)
+                        </button>
+                    </div>
+
+                    <!-- Users Table -->
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200">
+                        <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead>
+                                <tr class="text-left text-gray-500 border-b border-gray-100">
+                                    <th class="px-4 py-3 w-10">
+                                        <input type="checkbox" :checked="allFilteredSelected()" x-on:change="toggleSelectAllFiltered()"
+                                            class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 accent-indigo-600">
+                                    </th>
+                                    <th class="px-4 py-3 font-medium">Username</th>
+                                    <th class="px-4 py-3 font-medium">Email</th>
+                                    <th class="px-4 py-3 font-medium">Role</th>
+                                    <th class="px-4 py-3 font-medium">Groups</th>
+                                    <th class="px-4 py-3 font-medium">Created</th>
+                                    <th class="px-4 py-3 font-medium"></th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-100">
+                                <template x-for="u in visibleUsers()" :key="u.id">
+                                    <tr :class="_selectedUserIds.indexOf(u.id) >= 0 ? 'bg-indigo-50/50' : ''">
+                                        <td class="px-4 py-3">
+                                            <input type="checkbox" :checked="_selectedUserIds.indexOf(u.id) >= 0"
+                                                x-on:change="toggleUserSelect(u.id)"
+                                                class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 accent-indigo-600">
+                                        </td>
+                                        <td class="px-4 py-3 font-medium text-gray-900" x-text="u.username"></td>
+                                        <td class="px-4 py-3 text-gray-500" x-text="u.email"></td>
+                                        <td class="px-4 py-3">
+                                            <span :class="u.role === 'admin' ? 'bg-purple-100 text-purple-700' : u.role === 'service' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'" class="px-2 py-0.5 rounded-full text-xs font-medium" x-text="u.role"></span>
+                                        </td>
+                                        <td class="px-4 py-3">
+                                            <div class="flex flex-wrap gap-1">
+                                                <template x-for="gid in (u.group_ids || [])" :key="gid">
+                                                    <span class="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 text-[10px] font-medium" x-text="groups.find(function(g){return g.id===gid;})?.name || gid"></span>
+                                                </template>
+                                                <span x-show="!u.group_ids || u.group_ids.length === 0" class="text-xs text-gray-400">-</span>
+                                            </div>
+                                        </td>
+                                        <td class="px-4 py-3 text-gray-500" x-text="fmtDate(u.created_at)"></td>
+                                        <td class="px-4 py-3 text-right">
+                                            <button x-on:click="openEditUser(u)" class="text-xs text-indigo-600 hover:text-indigo-800 font-medium">Edit</button>
+                                        </td>
+                                    </tr>
+                                </template>
+                                <tr x-show="visibleUsers().length === 0">
+                                    <td colspan="7" class="px-4 py-8 text-center text-gray-400">No users</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        </div>
+                        <div class="px-4 py-3 border-t border-gray-100 flex items-center justify-between text-xs text-gray-400">
+                            <span>
+                                Showing <span class="font-medium text-gray-600" x-text="visibleUsers().length"></span>
+                                of <span class="font-medium text-gray-600" x-text="filteredUsers().length"></span> user(s)
+                                <span x-show="_userSearch || _userRoleFilter !== 'all' || _userGroupFilter">(filtered)</span>
+                            </span>
+                            <span x-show="_selectedUserIds.length > 0" class="text-indigo-600 font-medium" x-text="_selectedUserIds.length + ' selected'"></span>
+                        </div>
+                    </div>
+
+                    <!-- Bulk Group Access Modal -->
+                    <div x-show="showBulkGroupsModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center" style="display:none;">
+                        <div class="fixed inset-0 bg-black/40" x-on:click="showBulkGroupsModal = false"></div>
+                        <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] flex flex-col">
+                            <!-- Header -->
+                            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                                <div>
+                                    <h3 class="text-lg font-semibold text-gray-900">Give Group Access</h3>
+                                    <p class="text-xs text-gray-500" x-text="_selectedUserIds.length + ' user(s) selected'"></p>
+                                </div>
+                                <button x-on:click="showBulkGroupsModal = false" class="text-gray-400 hover:text-gray-600">
+                                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                                </button>
+                            </div>
+                            <!-- Body -->
+                            <div class="px-6 py-4 space-y-4 overflow-y-auto flex-1">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Groups to grant</label>
+                                    <div class="border border-gray-200 rounded-lg overflow-hidden">
+                                        <div class="px-3 py-2 border-b border-gray-100 bg-gray-50">
+                                            <input type="text" x-model="bulkGroupSearch" placeholder="Search groups..."
+                                                class="w-full rounded-md border border-gray-200 px-3 py-1.5 text-xs bg-white focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                                        </div>
+                                        <div class="max-h-40 overflow-y-auto divide-y divide-gray-50">
+                                            <template x-for="g in filteredBulkGroups()" :key="g.id">
+                                                <label class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-50 transition">
+                                                    <input type="checkbox" :checked="_bulkSelectedGroups.indexOf(g.id) >= 0"
+                                                        x-on:change="toggleBulkGroup(g.id)"
+                                                        class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 accent-indigo-600">
+                                                    <span class="text-sm text-gray-900 block truncate" x-text="g.name"></span>
+                                                </label>
+                                            </template>
+                                            <p x-show="filteredBulkGroups().length === 0" class="px-3 py-3 text-xs text-gray-400 text-center">No groups available</p>
+                                        </div>
+                                    </div>
+                                    <p class="text-xs text-gray-400 mt-2">Selected users are added to these groups. Existing memberships are kept.</p>
+                                </div>
+                            </div>
+                            <!-- Footer -->
+                            <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-2">
+                                <button x-on:click="showBulkGroupsModal = false" class="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition">Cancel</button>
+                                <button x-on:click="submitBulkGroups()" :disabled="_bulkSelectedGroups.length === 0"
+                                    :class="_bulkSelectedGroups.length > 0 ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'bg-gray-200 text-gray-400 cursor-not-allowed'"
+                                    class="px-4 py-2 rounded-lg text-sm font-medium transition">
+                                    Grant Access
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- User Modal (Create / Edit) -->
+                    <div x-show="showModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center" style="display:none;">
+                        <div class="fixed inset-0 bg-black/40" x-on:click="showModal = false"></div>
+                        <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] flex flex-col">
+                            <!-- Header -->
+                            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                                <h3 class="text-lg font-semibold text-gray-900" x-text="modalMode === 'create' ? 'Create User' : 'Edit User'"></h3>
+                                <button x-on:click="showModal = false" class="text-gray-400 hover:text-gray-600">
+                                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                                </button>
+                            </div>
+                            <!-- Body -->
+                            <div class="px-6 py-4 space-y-4 overflow-y-auto flex-1">
+                                <!-- Username (create only) -->
+                                <template x-if="modalMode === 'create'">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+                                        <input type="text" x-model="modalForm.username" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500" placeholder="e.g. john">
+                                    </div>
+                                </template>
+                                <template x-if="modalMode === 'edit'">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+                                        <div class="text-sm text-gray-500 py-2" x-text="modalUser?.username"></div>
+                                    </div>
+                                </template>
+
+                                <!-- Email -->
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                                    <input type="email" x-model="modalForm.email" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500" placeholder="user@example.com">
+                                </div>
+
+                                <!-- Password -->
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1" x-text="modalMode === 'create' ? 'Password' : 'New Password (leave blank to keep)'"></label>
+                                    <input type="password" x-model="modalForm.password" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500" placeholder="min 8 characters">
+                                </div>
+
+                                <!-- Role -->
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Role</label>
+                                    <select x-model="modalForm.role" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                                        <option value="user">User</option>
+                                        <option value="admin">Admin</option>
+                                        <option value="service">Service</option>
+                                    </select>
+                                </div>
+
+                                <!-- Groups -->
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Groups</label>
+                                    <div class="border border-gray-200 rounded-lg overflow-hidden">
+                                        <div class="px-3 py-2 border-b border-gray-100 bg-gray-50">
+                                            <input type="text" x-model="groupSearch" placeholder="Search groups..."
+                                                class="w-full rounded-md border border-gray-200 px-3 py-1.5 text-xs bg-white focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                                        </div>
+                                        <div class="max-h-40 overflow-y-auto divide-y divide-gray-50">
+                                            <template x-for="g in filteredGroups()" :key="g.id">
+                                                <label class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-50 transition">
+                                                    <input type="checkbox" :value="g.id"
+                                                        :checked="modalForm.group_ids.indexOf(g.id) >= 0"
+                                                        x-on:change="toggleModalGroup(g.id)"
+                                                        class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 accent-indigo-600">
+                                                    <span class="text-sm text-gray-700" x-text="g.name"></span>
+                                                </label>
+                                            </template>
+                                            <p x-show="filteredGroups().length === 0" class="px-3 py-3 text-xs text-gray-400 text-center">No groups found</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- Footer -->
+                            <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-2">
+                                <button x-on:click="showModal = false" class="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition">Cancel</button>
+                                <button x-on:click="submitModal()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition" x-text="modalMode === 'create' ? 'Create User' : 'Save Changes'"></button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Settings Tab -->
+                <div x-show="tab==='settings'" class="space-y-6 max-w-3xl">
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                        <div class="px-6 py-4 border-b border-gray-200">
+                            <h3 class="text-lg font-semibold text-gray-900">Platform Settings</h3>
+                            <p class="text-xs text-gray-500 mt-0.5">Toggle features and permissions for normal users. Changes take effect immediately.</p>
+                        </div>
+                        <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead>
+                                <tr class="text-left text-gray-500 bg-gray-50/80 border-b border-gray-100">
+                                    <th class="px-6 py-3 font-medium w-[40%]">Setting</th>
+                                    <th class="px-6 py-3 font-medium w-[45%]">Description</th>
+                                    <th class="px-6 py-3 font-medium text-center w-[15%]">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-100">
+                                <!-- Block Registrations -->
+                                <tr class="hover:bg-gray-50/50 transition">
+                                    <td class="px-6 py-4">
+                                        <div class="flex items-center gap-3">
+                                            <div class="w-8 h-8 rounded-lg bg-red-100 text-red-600 flex items-center justify-center shrink-0">
+                                                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/></svg>
+                                            </div>
+                                            <div>
+                                                <p class="text-sm font-medium text-gray-900">Block Registrations</p>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td class="px-6 py-4 text-xs text-gray-500">Prevent new user sign-ups. Only the first admin can be created.</td>
+                                    <td class="px-6 py-4 text-center">
+                                        <button x-on:click="toggleRegistration()" :class="settings.block_registrations ? 'bg-red-500' : 'bg-gray-300'" class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none">
+                                            <span :class="settings.block_registrations ? 'translate-x-5' : 'translate-x-0'" class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                                        </button>
+                                    </td>
+                                </tr>
+                                <!-- Allow User API Keys -->
+                                <tr class="hover:bg-gray-50/50 transition">
+                                    <td class="px-6 py-4">
+                                        <div class="flex items-center gap-3">
+                                            <div class="w-8 h-8 rounded-lg bg-amber-100 text-amber-600 flex items-center justify-center shrink-0">
+                                                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>
+                                            </div>
+                                            <div>
+                                                <p class="text-sm font-medium text-gray-900">API Keys</p>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td class="px-6 py-4 text-xs text-gray-500">Allow users to create and manage their own API keys.</td>
+                                    <td class="px-6 py-4 text-center">
+                                        <button x-on:click="toggleUserApiKeys()" :class="settings.allow_user_api_keys ? 'bg-indigo-600' : 'bg-gray-300'" class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none">
+                                            <span :class="settings.allow_user_api_keys ? 'translate-x-5' : 'translate-x-0'" class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                                        </button>
+                                    </td>
+                                </tr>
+                                <!-- Allow User Password Change -->
+                                <tr class="hover:bg-gray-50/50 transition">
+                                    <td class="px-6 py-4">
+                                        <div class="flex items-center gap-3">
+                                            <div class="w-8 h-8 rounded-lg bg-green-100 text-green-600 flex items-center justify-center shrink-0">
+                                                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>
+                                            </div>
+                                            <div>
+                                                <p class="text-sm font-medium text-gray-900">Password Change</p>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td class="px-6 py-4 text-xs text-gray-500">Allow users to change their own password from the Account page.</td>
+                                    <td class="px-6 py-4 text-center">
+                                        <button x-on:click="toggleUserPasswordChange()" :class="settings.allow_user_password_change ? 'bg-indigo-600' : 'bg-gray-300'" class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none">
+                                            <span :class="settings.allow_user_password_change ? 'translate-x-5' : 'translate-x-0'" class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                                        </button>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

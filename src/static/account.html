@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Account - Keystone</title>
+    <link rel="icon" type="image/svg+xml" href="/logo.svg">
+    <script defer src="/static/vendor/alpine.min.js"></script>
+    <script src="/static/vendor/tailwind.min.js"></script>
+    <style>
+                html:not(.dark) { color-scheme: light; }
+        html.dark { color-scheme: dark; }
+        html.dark body { background-color: #131316 !important; }
+        html.dark .bg-gray-50 { background-color: #131316 !important; }
+        html.dark .bg-white { background-color: #1a1a1f !important; }
+        html.dark .bg-gray-100 { background-color: #202027 !important; }
+        html.dark .bg-gray-200 { background-color: #26262e !important; }
+        html.dark .bg-gray-300 { background-color: #303038 !important; }
+        html.dark .bg-indigo-50 { background-color: #2b2b3d !important; }
+        html.dark .bg-indigo-50\/30 { background-color: rgba(43, 43, 61, 0.6) !important; }
+        html.dark .bg-indigo-100 { background-color: #35354a !important; }
+        html.dark .file\:bg-indigo-50 { background-color: #2b2b3d !important; }
+        html.dark .file\:text-indigo-700 { color: #a5b4fc !important; }
+        html.dark .text-gray-900 { color: #e8e8ea !important; }
+        html.dark .text-gray-800 { color: #d6d6da !important; }
+        html.dark .text-gray-700 { color: #c2c2c8 !important; }
+        html.dark .text-gray-600 { color: #a3a3ac !important; }
+        html.dark .text-gray-500 { color: #83838d !important; }
+        html.dark .text-gray-400 { color: #63636e !important; }
+        html.dark .text-gray-300 { color: #4c4c56 !important; }
+        html.dark .text-indigo-600, html.dark .text-indigo-500 { color: #a5b4fc !important; }
+        html.dark .text-indigo-700 { color: #93a0f7 !important; }
+        html.dark .text-indigo-800 { color: #b1c0ff !important; }
+        html.dark .text-red-600 { color: #f87171 !important; }
+        html.dark .text-green-600 { color: #4ade80 !important; }
+        html.dark .border-gray-100 { border-color: #232329 !important; }
+        html.dark .border-gray-200 { border-color: #2d2d34 !important; }
+        html.dark .border-gray-300 { border-color: #3b3b45 !important; }
+        html.dark .border-gray-400 { border-color: #4b4b57 !important; }
+        html.dark .border-indigo-200 { border-color: #3c3c55 !important; }
+        html.dark .placeholder-gray-400::placeholder { color: #63636e !important; }
+        html.dark .hover\:bg-gray-50:hover { background-color: #202027 !important; }
+        html.dark .bg-green-50 { background-color: #14281c !important; }
+        html.dark .border-green-200 { border-color: #1f4d2d !important; }
+        html.dark .text-green-800 { color: #86efac !important; }
+        html.dark .hover\:text-green-800:hover { color: #86efac !important; }
+        html.dark .hover\:bg-red-50:hover { background-color: rgba(127, 29, 29, 0.35) !important; }
+    </style>
+    <script>
+        (function() {
+            // Light/dark theme: saved choice wins, otherwise follow the OS.
+            var savedTheme = null;
+            try { savedTheme = localStorage.getItem('theme'); } catch (e) {}
+            var dark = savedTheme ? savedTheme === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+            if (dark) document.documentElement.classList.add('dark');
+        })();
+        function clearAuth() {
+            try { localStorage.removeItem('token'); } catch (e) {}
+            try { localStorage.removeItem('refresh_token'); } catch (e) {}
+            try { localStorage.removeItem('user'); } catch (e) {}
+        }
+        (function() {
+            var token = null;
+            try { token = localStorage.getItem('token'); } catch (e) {}
+            if (!token) { window.location.href = '/login'; return; }
+            try {
+                var payload = JSON.parse(atob(token.split('.')[1]));
+                var now = Math.floor(Date.now() / 1000);
+                if (payload.exp && payload.exp < now) {
+                    // The refresh token lives in an httpOnly cookie set by the
+                    // server; refresh without a body and never persist it in
+                    // JS-accessible storage where an XSS could exfiltrate it.
+                    fetch('/auth/refresh', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' })
+                        .then(function(r) { if (!r.ok) { clearAuth(); window.location.href = '/login'; return null; } return r.json(); })
+                        .then(function(d) { if (d) { try { localStorage.setItem('token', d.access_token); localStorage.setItem('user', JSON.stringify(d.user)); } catch (e) {} } })
+                        .catch(function() { clearAuth(); window.location.href = '/login'; });
+                }
+            } catch(e) { clearAuth(); window.location.href = '/login'; }
+        })();
+        function sidebar() {
+            var u = null;
+            try { u = JSON.parse(localStorage.getItem('user') || 'null'); } catch (e) { u = null; }
+            return {
+                user: u,
+                userName: u ? u.username : '',
+                userEmail: u ? u.email : '',
+                userInitial: u && u.username ? u.username.charAt(0).toUpperCase() : '?',
+                active: function(p) { return window.location.pathname === p; },
+                logout: function() {
+                    // Revoke the server-side session (httpOnly refresh cookie) if possible.
+                    try { fetch('/auth/logout', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' }); } catch (e) {}
+                    clearAuth();
+                    window.location.href = '/login';
+                },
+                themeDark: document.documentElement.classList.contains('dark'),
+                toggleTheme: function() {
+                    this.themeDark = !this.themeDark;
+                    document.documentElement.classList.toggle('dark', this.themeDark);
+                    try { localStorage.setItem('theme', this.themeDark ? 'dark' : 'light'); } catch (e) {}
+                },
+                sidebarOpen: false,
+                toggleSidebar: function() { this.sidebarOpen = !this.sidebarOpen; },
+                closeSidebar: function() { this.sidebarOpen = false; }
+            };
+        }
+        function accountPage() {
+            var params = new URLSearchParams(window.location.search);
+            var validTabs = ['profile','security','api-key'];
+            var initialTab = validTabs.indexOf(params.get('tab')) >= 0 ? params.get('tab') : 'profile';
+            var u = null;
+            try { u = JSON.parse(localStorage.getItem('user') || 'null'); } catch (e) { u = null; }
+            return {
+                tab: initialTab,
+                userName: u ? u.username : '',
+                userEmail: u ? u.email : '',
+                storagePercent: 0,
+                storageText: '0 B / No quota set',
+                currentPassword: '',
+                newPassword: '',
+                passwordMsg: '',
+                passwordOk: false,
+                apiKey: null,
+                keyCreated: null,
+                permissions: null,
+                init: function() {
+                    this.loadKey();
+                    this.loadPermissions();
+                },
+                setTab: function(t) {
+                    this.tab = t;
+                    var url = new URL(window.location);
+                    url.searchParams.set('tab', t);
+                    window.history.pushState({}, '', url);
+                },
+                loadKey: function() {
+                    var self = this;
+                    var token = null;
+                    try { token = localStorage.getItem('token'); } catch (e) {}
+                    fetch('/api/api-keys', { headers: { 'Authorization': 'Bearer ' + token } })
+                        .then(function(r) { return r.json(); })
+                        .then(function(d) { self.apiKey = d.filter(function(k){return k.is_active;}).length > 0 ? d.filter(function(k){return k.is_active;})[0] : null; })
+                        .catch(function() {});
+                },
+                loadPermissions: function() {
+                    var self = this;
+                    var token = null;
+                    try { token = localStorage.getItem('token'); } catch (e) {}
+                    fetch('/api/me/permissions', { headers: { 'Authorization': 'Bearer ' + token } })
+                        .then(function(r) { return r.json(); })
+                        .then(function(d) { self.permissions = d; })
+                        .catch(function() {});
+                },
+                apiKeyEnabled: function() {
+                    if (this.permissions) return this.permissions.allow_api_keys;
+                    return true; // default to showing until loaded
+                },
+                passwordChangeEnabled: function() {
+                    if (this.permissions) return this.permissions.allow_password_change;
+                    return true; // default to showing until loaded
+                },
+                createKey: function() {
+                    var self = this;
+                    var token = null;
+                    try { token = localStorage.getItem('token'); } catch (e) {}
+                    var name = 'Personal Key ' + new Date().toLocaleDateString();
+                    fetch('/api/api-keys', {
+                        method: 'POST',
+                        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name: name, scopes: ['files:read','files:write'] })
+                    }).then(function(r) {
+                        if (!r.ok) return r.text().then(function(t) { try { var j = JSON.parse(t); throw j; } catch(e) { throw { detail: t }; } });
+                        return r.json();
+                    }).then(function(d) {
+                        self.keyCreated = d;
+                        self.loadKey();
+                    }).catch(function(e) { alert(e.detail || e.error || 'Failed to create API key'); });
+                },
+                regenerateKey: function() {
+                    var self = this;
+                    if (!confirm('Regenerate API key? Your old key will stop working immediately.')) return;
+                    var token = null;
+                    try { token = localStorage.getItem('token'); } catch (e) {}
+                    fetch('/api/api-keys/regenerate', {
+                        method: 'POST',
+                        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }
+                    }).then(function(r) {
+                        if (!r.ok) return r.text().then(function(t) { try { var j = JSON.parse(t); throw j; } catch(e) { throw { detail: t }; } });
+                        return r.json();
+                    }).then(function(d) {
+                        self.keyCreated = d;
+                        self.loadKey();
+                    }).catch(function(e) { alert(e.detail || e.error || 'Failed to regenerate API key'); });
+                },
+                changePassword: function() {
+                    var self = this;
+                    if (!self.currentPassword || !self.newPassword) return;
+                    var token = null;
+                    try { token = localStorage.getItem('token'); } catch (e) {}
+                    fetch('/api/auth/change-password', {
+                        method: 'POST',
+                        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ current_password: self.currentPassword, new_password: self.newPassword })
+                    }).then(function(r) {
+                        if (!r.ok) return r.json().then(function(e) { throw e; });
+                        return r.json();
+                    }).then(function() {
+                        self.passwordMsg = 'Password updated successfully.';
+                        self.passwordOk = true;
+                        self.currentPassword = '';
+                        self.newPassword = '';
+                    }).catch(function(e) {
+                        self.passwordMsg = e.detail || e.error || 'Failed to update password.';
+                        self.passwordOk = false;
+                    });
+                }
+            };
+        }
+    </script>
+</head>
+<body class="h-full bg-gray-50">
+    <div class="flex h-full" x-data="sidebar()" x-on:keydown.escape.window="closeSidebar()">
+        <div x-show="sidebarOpen" x-cloak class="fixed inset-0 z-30 bg-black/40 lg:hidden" x-on:click="closeSidebar()" style="display:none;"></div>
+        <aside class="fixed inset-y-0 left-0 z-40 w-64 bg-white border-r border-gray-200 flex flex-col shrink-0 transition-transform duration-200 ease-in-out lg:static lg:translate-x-0"
+            :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'">
+            <div class="p-6 border-b border-gray-200">
+                <h1 class="flex items-center gap-2 text-xl font-bold text-gray-900"><img src="/logo.svg" alt="Keystone logo" class="w-7 h-7 shrink-0">Keystone</h1>
+            </div>
+            <nav class="flex-1 p-4 space-y-1">
+                <a href="/" x-on:click="closeSidebar()" :class="active('/') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+                    Dashboard
+                </a>
+                <a href="/files" x-on:click="closeSidebar()" :class="active('/files') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+                    Files
+                </a>
+                <a href="/account" x-on:click="closeSidebar()" :class="active('/account') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                    Account
+                </a>
+                <template x-if="user && user.role === 'admin'">
+                    <a href="/admin?page=overview" x-on:click="closeSidebar()" :class="active('/admin') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                        Admin
+                    </a>
+                </template>
+                <template x-if="user && user.role === 'admin'">
+                    <a href="/docs" x-on:click="closeSidebar()" :class="active('/docs') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
+                        Documentation
+                    </a>
+                </template>
+            </nav>
+            <div class="p-4 border-t border-gray-200 space-y-3">
+                <div class="flex items-center gap-3">
+                    <div class="w-8 h-8 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-700 font-medium text-sm" x-text="userInitial"></div>
+                    <div class="flex-1 min-w-0">
+                        <p class="text-sm font-medium text-gray-900 truncate" x-text="userName"></p>
+                        <p class="text-xs text-gray-400 truncate" x-text="userEmail"></p>
+                    </div>
+                </div>
+                <div class="flex items-center justify-between px-1">
+                    <span class="text-sm text-gray-600 flex items-center gap-2">
+                        <svg x-show="!themeDark" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+                        <svg x-show="themeDark" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
+                        <span x-text="themeDark ? 'Dark mode' : 'Light mode'"></span>
+                    </span>
+                    <button x-on:click="toggleTheme()" role="switch" :aria-checked="themeDark"
+                        :class="themeDark ? 'bg-indigo-600' : 'bg-gray-300'"
+                        class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none">
+                        <span :class="themeDark ? 'translate-x-4' : 'translate-x-0'"
+                            class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                    </button>
+                </div>
+                <button x-on:click="closeSidebar(); logout()" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-red-600 hover:bg-red-50 transition">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+                    Sign Out
+                </button>
+                <div class="px-1 pt-1 text-xs text-gray-400">Keystone v__KEYSTONE_VERSION__</div>
+            </div>
+        </aside>
+        <main class="flex-1 overflow-auto" x-data="accountPage()">
+            <div class="lg:hidden flex items-center gap-3 px-4 py-3 bg-white border-b border-gray-200 shrink-0">
+                <button x-on:click="toggleSidebar()" class="p-2 -ml-2 rounded-lg text-gray-600 hover:bg-gray-100 transition" aria-label="Toggle navigation menu">
+                    <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+                </button>
+                <span class="text-base font-semibold text-gray-900">Account Settings</span>
+            </div>
+            <div class="p-4 sm:p-8">
+            <h2 class="text-2xl font-bold text-gray-900 mb-6">Account Settings</h2>
+
+            <!-- Tab Navigation -->
+            <div class="border-b border-gray-200 mb-6">
+                <div class="flex flex-wrap gap-0 -mb-px">
+                    <button x-on:click="setTab('profile')" :class="tab==='profile' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Profile</button>
+                    <button x-on:click="setTab('security')" :class="tab==='security' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Security</button>
+                    <button x-on:click="setTab('api-key')" :class="tab==='api-key' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">API Key</button>
+                </div>
+            </div>
+
+            <div class="max-w-2xl space-y-6">
+
+                <!-- Profile Tab -->
+                <div x-show="tab==='profile'" class="space-y-6">
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                        <h3 class="text-lg font-semibold text-gray-900 mb-4">Profile</h3>
+                        <form class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+                                <input type="text" x-model="userName" readonly class="block w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-sm text-gray-500">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                                <input type="email" x-model="userEmail" readonly class="block w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-sm text-gray-500">
+                            </div>
+                        </form>
+                    </div>
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                        <h3 class="text-lg font-semibold text-gray-900 mb-4">Storage</h3>
+                        <div class="w-full bg-gray-200 rounded-full h-2.5">
+                            <div class="bg-indigo-600 h-2.5 rounded-full" :style="'width: ' + storagePercent + '%'"></div>
+                        </div>
+                        <p class="text-sm text-gray-500 mt-2" x-text="storageText"></p>
+                    </div>
+                </div>
+
+                <!-- Security Tab -->
+                <div x-show="tab==='security'" class="space-y-6">
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                        <h3 class="text-lg font-semibold text-gray-900 mb-4">Change Password</h3>
+
+                        <!-- Disabled message when setting is off -->
+                        <div x-show="!passwordChangeEnabled()" class="bg-gray-50 border border-gray-200 rounded-xl p-6 text-center">
+                            <svg class="w-10 h-10 mx-auto text-gray-300 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+                            <p class="text-sm font-medium text-gray-700 mb-1">Password change is disabled</p>
+                            <p class="text-xs text-gray-500">Contact an administrator to enable password changes for your account.</p>
+                        </div>
+
+                        <!-- Password change form -->
+                        <form class="space-y-4" x-show="passwordChangeEnabled()" x-on:submit.prevent="changePassword()">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Current Password</label>
+                                <input type="password" x-model="currentPassword" autocomplete="current-password" class="block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">New Password</label>
+                                <input type="password" x-model="newPassword" autocomplete="new-password" class="block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                            </div>
+                            <div x-show="passwordMsg" class="text-sm" :class="passwordOk ? 'text-green-600' : 'text-red-600'" x-text="passwordMsg"></div>
+                            <button type="submit" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition">
+                                Update Password
+                            </button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- API Key Tab -->
+                <div x-show="tab==='api-key'" class="space-y-6">
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                        <h3 class="text-lg font-semibold text-gray-900 mb-4">API Key</h3>
+
+                        <!-- Disabled message for non-admins when setting is off -->
+                        <div x-show="!apiKeyEnabled()" class="bg-gray-50 border border-gray-200 rounded-xl p-6 text-center">
+                            <svg class="w-10 h-10 mx-auto text-gray-300 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+                            <p class="text-sm font-medium text-gray-700 mb-1">API key management is disabled</p>
+                            <p class="text-xs text-gray-500">Contact an administrator to enable API key access for your account.</p>
+                        </div>
+
+                        <!-- Key created success message -->
+                        <div x-show="apiKeyEnabled() && keyCreated" class="bg-green-50 border border-green-200 rounded-xl p-4 mb-4">
+                            <div class="flex items-start justify-between gap-4">
+                                <div class="min-w-0 flex-1">
+                                    <p class="text-sm font-medium text-green-800">API Key Created</p>
+                                    <p class="text-xs text-green-600 mt-1">Copy this key now. It will not be shown again.</p>
+                                    <code class="block mt-2 p-2 bg-white rounded text-xs font-mono break-all text-gray-900 border" x-text="keyCreated && keyCreated.full_key"></code>
+                                </div>
+                                <button x-on:click="keyCreated = null" class="text-green-600 hover:text-green-800 shrink-0">
+                                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Existing key -->
+                        <div x-show="apiKeyEnabled() && apiKey && !keyCreated" class="space-y-3">
+                            <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                                <div class="min-w-0">
+                                    <p class="text-sm font-medium text-gray-900" x-text="apiKey ? apiKey.name : ''"></p>
+                                    <p class="text-xs text-gray-400 font-mono" x-text="apiKey ? apiKey.prefix + '...' : ''"></p>
+                                </div>
+                            </div>
+                            <div class="flex gap-3">
+                                <button x-on:click="regenerateKey()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition">Regenerate Key</button>
+                            </div>
+                            <p class="text-xs text-gray-400">Regenerate creates a new key and invalidates the old one immediately.</p>
+                        </div>
+
+                        <!-- No key - generate button -->
+                        <div x-show="apiKeyEnabled() && !apiKey && !keyCreated">
+                            <p class="text-sm text-gray-500 mb-3">Create an API key for programmatic access to your account.</p>
+                            <button x-on:click="createKey()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition">
+                                Generate API Key
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

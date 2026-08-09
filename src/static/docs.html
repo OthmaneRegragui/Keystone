@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Documentation - Keystone</title>
+    <link rel="icon" type="image/svg+xml" href="/logo.svg">
+    <script defer src="/static/vendor/alpine.min.js"></script>
+    <script src="/static/vendor/tailwind.min.js"></script>
+    <style>
+        html:not(.dark) { color-scheme: light; }
+        html.dark { color-scheme: dark; }
+        html.dark body { background-color: #131316 !important; }
+        html.dark .bg-gray-50 { background-color: #131316 !important; }
+        html.dark .bg-white { background-color: #1a1a1f !important; }
+        html.dark .bg-gray-100 { background-color: #202027 !important; }
+        html.dark .bg-gray-200 { background-color: #26262e !important; }
+        html.dark .bg-gray-300 { background-color: #303038 !important; }
+        html.dark .text-gray-900 { color: #e8e8ea !important; }
+        html.dark .text-gray-800 { color: #d6d6da !important; }
+        html.dark .text-gray-700 { color: #c2c2c8 !important; }
+        html.dark .text-gray-600 { color: #a3a3ac !important; }
+        html.dark .text-gray-500 { color: #83838d !important; }
+        html.dark .text-gray-400 { color: #63636e !important; }
+        html.dark .text-gray-300 { color: #4c4c56 !important; }
+        html.dark .border-gray-200, html.dark .border-gray-300 { border-color: #2c2c33 !important; }
+        html.dark code { background-color: #2b2b3d !important; color: #a5b4fc !important; }
+        html.dark pre { background-color: #16161a !important; color: #c2c2c8 !important; }
+        code { background-color: #fef3c7; color: #b45309; border-radius: 0.25rem; padding: 0.1rem 0.35rem; font-size: 0.85em; }
+        pre { background-color: #0f172a; color: #e2e8f0; border-radius: 0.5rem; padding: 1rem; overflow-x: auto; font-size: 0.8rem; line-height: 1.5; }
+        pre code { background: transparent; color: inherit; padding: 0; }
+        .doc-anchor { scroll-margin-top: 5.5rem; }
+        /* Summer: scroll container smooth-jumps to section anchors */
+        main { scroll-behavior: smooth; }
+
+        /* Summer page background (light) — warm sunrise gradient */
+        body.summer-bg {
+            background: linear-gradient(180deg, #fffbeb 0%, #fff7ed 45%, #fef3c7 100%);
+        }
+        html.dark body.summer-bg {
+            background: #131316 !important;
+        }
+
+        /* Sticky section nav — translucent so content shows through, blurred */
+        .docs-nav {
+            background-color: rgba(255, 251, 235, 0.92);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+        }
+        html.dark .docs-nav {
+            background-color: rgba(19, 19, 22, 0.92) !important;
+        }
+
+        /* Sunny banner at the top of the docs */
+        .docs-banner {
+            background: linear-gradient(90deg, #fef3c7, #fefce8 45%, #ffedd5);
+            border-color: #fde68a;
+        }
+        html.dark .docs-banner {
+            background: linear-gradient(90deg, #2b2b3d, #1a1a1f 45%, #2b2416) !important;
+            border-color: #3a3a42 !important;
+        }
+
+        /* Dark-mode overrides for the summer amber/orange accents */
+        html.dark .bg-amber-100 { background-color: #2b2b3d !important; }
+        html.dark .text-amber-600, html.dark .text-amber-500 { color: #fbbf24 !important; }
+        html.dark .text-amber-700 { color: #fcd34d !important; }
+        html.dark .text-amber-800 { color: #fde68a !important; }
+        html.dark .text-amber-900 { color: #fef3c7 !important; }
+        html.dark .border-amber-200 { border-color: #2c2c33 !important; }
+        html.dark .border-amber-500 { border-color: #f59e0b !important; }
+
+        /* Section headings get a little sun-bar accent */
+        .doc-anchor h3 {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .doc-anchor h3::before {
+            content: "";
+            width: 0.4rem;
+            height: 1.4rem;
+            border-radius: 9999px;
+            background: linear-gradient(180deg, #f59e0b, #fb923c);
+        }
+        html.dark .doc-anchor h3::before {
+            background: linear-gradient(180deg, #f59e0b, #b45309) !important;
+        }
+    </style>
+</head>
+<body class="h-full bg-gray-50 summer-bg">
+    <script>
+        (function() {
+            function redirectLogin() { try { window.location.replace('/login'); } catch (e) {} }
+            function read(name) { try { return localStorage.getItem(name); } catch (e) { return null; } }
+            function roleFromToken(token) {
+                try { return JSON.parse(atob(token.split('.')[1])).role; } catch (e) { return null; }
+            }
+            var token = read('token');
+            if (!token) { redirectLogin(); return; }
+            var role = roleFromToken(token);
+            if (role === 'admin') return;
+            // The refresh token lives in an httpOnly cookie set by the server;
+            // refresh without a body and never persist it in JS storage.
+            fetch('/auth/refresh', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: '{}'
+            })
+                .then(function(r) { return r.ok ? r.json() : null; })
+                .then(function(d) {
+                    if (d && d.access_token) {
+                        try { localStorage.setItem('token', d.access_token); } catch (e) {}
+                        if (d.user) { try { localStorage.setItem('user', JSON.stringify(d.user)); } catch (e) {} }
+                        if (roleFromToken(d.access_token) !== 'admin') redirectLogin();
+                    } else { redirectLogin(); }
+                })
+                .catch(redirectLogin);
+        })();
+    </script>
+    <div class="flex h-full" x-data="sidebar()" x-on:keydown.escape.window="closeSidebar()">
+        <div x-show="sidebarOpen" x-cloak class="fixed inset-0 z-30 bg-black/40 lg:hidden" x-on:click="closeSidebar()" style="display:none;"></div>
+        <aside class="fixed inset-y-0 left-0 z-40 w-64 bg-white border-r border-gray-200 flex flex-col shrink-0 transition-transform duration-200 ease-in-out lg:static lg:translate-x-0"
+            :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'">
+            <div class="p-6 border-b border-gray-200">
+                <h1 class="flex items-center gap-2 text-xl font-bold text-gray-900">
+                    <img src="/logo.svg" alt="Keystone logo" class="w-7 h-7 shrink-0">
+                    Keystone
+                </h1>
+            </div>
+            <nav class="flex-1 p-4 space-y-1">
+                <a href="/" x-on:click="closeSidebar()" :class="active('/') ? 'bg-amber-100 text-amber-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+                    Dashboard
+                </a>
+                <a href="/files" x-on:click="closeSidebar()" :class="active('/files') ? 'bg-amber-100 text-amber-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+                    Files
+                </a>
+                <a href="/account" x-on:click="closeSidebar()" :class="active('/account') ? 'bg-amber-100 text-amber-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                    Account
+                </a>
+                <template x-if="user && user.role === 'admin'">
+                    <a href="/admin?page=overview" x-on:click="closeSidebar()" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-50">
+                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                        Admin
+                    </a>
+                </template>
+                <template x-if="user && user.role === 'admin'">
+                    <a href="/docs" x-on:click="closeSidebar()" :class="active('/docs') ? 'bg-amber-100 text-amber-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
+                        Documentation
+                    </a>
+                </template>
+            </nav>
+            <div class="p-4 border-t border-gray-200 space-y-3">
+                <div class="flex items-center gap-3">
+                    <div class="w-8 h-8 bg-amber-100 rounded-full flex items-center justify-center text-amber-700 font-medium text-sm" x-text="userInitial"></div>
+                    <div class="flex-1 min-w-0">
+                        <p class="text-sm font-medium text-gray-900 truncate" x-text="userName"></p>
+                        <p class="text-xs text-gray-400 truncate" x-text="userEmail"></p>
+                    </div>
+                </div>
+                <div class="flex items-center justify-between px-1">
+                    <span class="text-sm text-gray-600 flex items-center gap-2">
+                        <svg x-show="!themeDark" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+                        <svg x-show="themeDark" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
+                        <span x-text="themeDark ? 'Dark mode' : 'Light mode'"></span>
+                    </span>
+                    <button x-on:click="toggleTheme()" role="switch" :aria-checked="themeDark"
+                        :class="themeDark ? 'bg-amber-500' : 'bg-gray-300'"
+                        class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none">
+                        <span :class="themeDark ? 'translate-x-4' : 'translate-x-0'"
+                            class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                    </button>
+                </div>
+                <button x-on:click="logout(); closeSidebar()" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-red-600 hover:bg-red-50 transition">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+                    Sign Out
+                </button>
+                <div class="px-1 pt-1 text-xs text-gray-400">Keystone v__KEYSTONE_VERSION__</div>
+            </div>
+        </aside>
+
+        <main class="flex-1 overflow-auto" x-data="docsApp()" x-init="init()">
+            <div class="lg:hidden flex items-center gap-3 px-4 py-3 bg-white border-b border-gray-200 shrink-0">
+                <button x-on:click="toggleSidebar()" class="p-2 -ml-2 rounded-lg text-gray-600 hover:bg-gray-100 transition" aria-label="Toggle navigation menu">
+                    <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+                </button>
+                <span class="text-base font-semibold text-gray-900">Documentation</span>
+            </div>
+            <!-- Admin gate -->
+            <div x-show="!isAdmin" class="h-full flex items-center justify-center p-8">
+                <div class="text-center max-w-md">
+                    <img src="/logo.svg" alt="Keystone logo" class="w-16 h-16 mx-auto mb-4 opacity-40">
+                    <h2 class="text-xl font-bold text-gray-900 mb-2">Restricted</h2>
+                    <p class="text-sm text-gray-500 mb-6">Documentation is available to administrators only.</p>
+                    <a href="/files" class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500 text-white text-sm font-medium hover:bg-amber-600">Back to Files</a>
+                </div>
+            </div>
+
+            <!-- Docs content -->
+            <div x-show="isAdmin" class="p-4 sm:p-8 max-w-4xl">
+                <div class="docs-banner border rounded-2xl px-5 py-4 flex items-center gap-4 mb-8">
+                    <div class="w-12 h-12 rounded-full bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center shrink-0 shadow-md">
+                        <svg class="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+                    </div>
+                    <div class="min-w-0">
+                        <h2 class="text-xl sm:text-2xl font-bold text-amber-900 mb-0.5">Documentation</h2>
+                        <p class="text-xs sm:text-sm text-amber-800">Operational reference for Keystone administrators. The tabs below follow you as you scroll — the active section stays highlighted, and the URL hash updates so you can bookmark any spot.</p>
+                    </div>
+                </div>
+
+                <nav class="docs-nav sticky top-0 z-20 -mx-4 sm:-mx-8 px-4 sm:px-8 flex gap-1 border-b border-amber-200 flex-wrap text-sm">
+                    <a href="#overview" x-on:click="activeSection = 'overview'"
+                        :class="activeSection === 'overview' ? 'text-amber-700 font-medium border-amber-500' : 'text-gray-500 hover:text-amber-600 border-transparent hover:border-amber-300'"
+                        class="px-3 py-2 border-b-2 -mb-px transition-colors">Overview</a>
+                    <a href="#storage" x-on:click="activeSection = 'storage'"
+                        :class="activeSection === 'storage' ? 'text-amber-700 font-medium border-amber-500' : 'text-gray-500 hover:text-amber-600 border-transparent hover:border-amber-300'"
+                        class="px-3 py-2 border-b-2 -mb-px transition-colors">Storage Layout</a>
+                    <a href="#naming" x-on:click="activeSection = 'naming'"
+                        :class="activeSection === 'naming' ? 'text-amber-700 font-medium border-amber-500' : 'text-gray-500 hover:text-amber-600 border-transparent hover:border-amber-300'"
+                        class="px-3 py-2 border-b-2 -mb-px transition-colors">Name Rules</a>
+                    <a href="#deep-links" x-on:click="activeSection = 'deep-links'"
+                        :class="activeSection === 'deep-links' ? 'text-amber-700 font-medium border-amber-500' : 'text-gray-500 hover:text-amber-600 border-transparent hover:border-amber-300'"
+                        class="px-3 py-2 border-b-2 -mb-px transition-colors">Deep Links</a>
+                    <a href="#operations" x-on:click="activeSection = 'operations'"
+                        :class="activeSection === 'operations' ? 'text-amber-700 font-medium border-amber-500' : 'text-gray-500 hover:text-amber-600 border-transparent hover:border-amber-300'"
+                        class="px-3 py-2 border-b-2 -mb-px transition-colors">Operations</a>
+                    <a href="#api" x-on:click="activeSection = 'api'"
+                        :class="activeSection === 'api' ? 'text-amber-700 font-medium border-amber-500' : 'text-gray-500 hover:text-amber-600 border-transparent hover:border-amber-300'"
+                        class="px-3 py-2 border-b-2 -mb-px transition-colors">API Reference</a>
+                    <a href="#errors" x-on:click="activeSection = 'errors'"
+                        :class="activeSection === 'errors' ? 'text-amber-700 font-medium border-amber-500' : 'text-gray-500 hover:text-amber-600 border-transparent hover:border-amber-300'"
+                        class="px-3 py-2 border-b-2 -mb-px transition-colors">Errors</a>
+                </nav>
+
+                <!-- Overview -->
+                <section id="overview" class="doc-anchor mb-10">
+                    <h3 class="text-lg font-bold text-gray-900 mb-3">Overview</h3>
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-4 text-sm text-gray-600 leading-relaxed">
+                        <p>Keystone is a self-hosted, content-addressable file platform. Every file is stored under its SHA-256 hash, so duplicate uploads are automatically de-duplicated (the same bytes occupy one storage slot, referenced by many user files). It is API-first: every UI action calls a JSON HTTP API.</p>
+                        <p class="font-medium text-gray-900">Core concepts</p>
+                        <ul class="list-disc pl-5 space-y-1">
+                            <li><span class="font-medium text-gray-900">Storage paths</span> — physical directories (disks/mounts) configured via <code>STORAGE_LOCAL_PATHS</code>. The first is the default for new uploads.</li>
+                            <li><span class="font-medium text-gray-900">Backends</span> — a logical storage location mapped to a storage path.</li>
+                            <li><span class="font-medium text-gray-900">Buckets</span> — top-level namespaces users are granted access to. Each bucket maps to a directory on disk.</li>
+                            <li><span class="font-medium text-gray-900">Groups</span> — permission bundles (bucket access, roles, quotas) applied to users.</li>
+                            <li><span class="font-medium text-gray-900">User files / folders</span> — the metadata tree; content lives once in the hash store.</li>
+                        </ul>
+                        <p>The UI is fully self-contained (Vendored Alpine.js + Tailwind, embedded SVG logo) — no CDN dependency, works offline behind firewalls.</p>
+                    </div>
+                </section>
+
+                <!-- Storage layout -->
+                <section id="storage" class="doc-anchor mb-10">
+                    <h3 class="text-lg font-bold text-gray-900 mb-3">Storage Layout</h3>
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-4 text-sm text-gray-600 leading-relaxed">
+                        <p>Files land on disk at:</p>
+<pre><code>$STORAGE_LOCAL_PATHS/&lt;storage-path-slug&gt;/&lt;bucket-name&gt;/&lt;blake3-shards&gt;/&lt;blake3-hash&gt;</code></pre>
+                        <p>The hash is sharded into two-byte prefix directories (<code>fc/bd</code> style) to avoid huge flat directories. Example with the Docker default:</p>
+<pre><code># inside the server container:
+/mnt/keystone/data/test1/test1/fc/bd/a3f...c19   (bucket "test1", backend "test1", file hash a3f...)
+
+# on the Docker host (default setup — named volume):
+/var/lib/docker/volumes/keystone_storagedata/_data/test1/test1/fc/bd/a3f...c19</code></pre>
+                        <p class="mt-4"><span class="font-medium text-gray-900">Where the folder lives on your PC:</span> set <code>DATA_HOST_PATH</code> in <code>.env</code> to choose the host-side half of the mount. The server always sees <code>/mnt/keystone/data</code> (or <code>STORAGE_LOCAL_PATHS</code>) — only the <em>outside</em> half changes:</p>
+                        <ul class="list-disc pl-5 space-y-1">
+                            <li><code>DATA_HOST_PATH=</code> (empty) — Docker named volume <code>storagedata</code> (default; hidden under <code>/var/lib/docker/volumes/keystone_storagedata/_data</code>).</li>
+                            <li><code>DATA_HOST_PATH=./data</code> — a real folder next to the project (<code>&lt;project&gt;/data</code>), visible and easy to back up. Relative paths are anchored to the project root by <code>./docker-run.sh</code>.</li>
+                            <li><code>DATA_HOST_PATH=/any/absolute/path</code> — bind mount to that exact host path, e.g. a second disk.</li>
+                        </ul>
+                        <p>Switching (e.g. volume &rarr; <code>./data</code>): copy existing files once with <code>docker run --rm -v keystone_storagedata:/from -v "$PWD/data":/to alpine sh -c 'cp -a /from/. /to/ &amp;&amp; chown -R 1000:1000 /to'</code>, set <code>DATA_HOST_PATH=./data</code>, restart, then verify before removing the old volume.</p>
+                        <p class="mt-4"><span class="font-medium text-gray-900">Key rules:</span></p>
+                        <ul class="list-disc pl-5 space-y-1">
+                            <li><code>STORAGE_LOCAL_PATHS</code> entries must be absolute paths <em>inside the server container</em>. The compose stack mounts <code>${DATA_HOST_PATH:-storagedata}</code> at <code>/mnt/keystone/data</code>.</li>
+                            <li>Keep the <em>container-side</em> path stable forever — the database stores absolute paths (e.g. <code>buckets.path = /mnt/keystone/data/test1/test1</code>). Changing the mount <em>target</em> requires a data migration; changing <code>DATA_HOST_PATH</code> (the mount <em>source</em>) does not.</li>
+                            <li><code>storage_objects.storage_path</code> is <em>relative</em> (backend-relative); <code>buckets.path</code> and <code>storage_paths.path</code> are absolute.</li>
+                        </ul>
+                        <p>Migration <code>0015_storage_root_mount</code> rewrote legacy <code>/data/storage</code> prefixes to <code>/mnt/keystone/data</code>. Verify with:</p>
+<pre><code>docker exec keystone-postgres psql -U keystone -d keystone -c \
+  "SELECT name, path FROM buckets; SELECT slug, path FROM storage_paths;"</code></pre>
+                    </div>
+                </section>
+
+                <!-- Naming rules -->
+                <section id="naming" class="doc-anchor mb-10">
+                    <h3 class="text-lg font-bold text-gray-900 mb-3">Name Validation Rules</h3>
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-4 text-sm text-gray-600 leading-relaxed">
+                        <p>Files, folders, <span class="font-medium">and bucket names</span> are validated server-side (<code>src/utils/names.rs</code>) so every name is safe on all major OS filesystems. A name is rejected if it:</p>
+                        <ul class="list-disc pl-5 space-y-1">
+                            <li>is empty, or equals <code>.</code> or <code>..</code></li>
+                            <li>contains control characters (newline, tab, etc.)</li>
+                            <li>contains any of <code>\ / : * ? " &lt; &gt; |</code></li>
+                            <li>starts with a space, or ends with a space or a dot</li>
+                            <li>exceeds 255 bytes</li>
+                            <li>is a Windows reserved device name, case-insensitive (with or without extension): <code>CON PRN AUX NUL COM1-9 LPT1-9</code></li>
+                        </ul>
+                        <p>The same rules are mirrored in the browser UI (<code>validateName</code>) so invalid names are caught before upload. Admin imports (folder resolution + file names) are validated too — an import is skipped per-item rather than failing wholesale.</p>
+                        <p class="mt-2">Why: a folder named <code>CON</code> or a file named <code>bad:name</code> is legal on Linux but impossible or dangerous on Windows/macOS, and breaks syncing tools. Enforcing one strict, portable rule set keeps the platform usable everywhere.</p>
+                    </div>
+                </section>
+
+                <!-- Deep links -->
+                <section id="deep-links" class="doc-anchor mb-10">
+                    <h3 class="text-lg font-bold text-gray-900 mb-3">URL Deep Links</h3>
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-4 text-sm text-gray-600 leading-relaxed">
+                        <p>The Files UI keeps the current location in the URL so pages can be bookmarked and shared:</p>
+<pre><code>/files?dir=/                Root of your current bucket
+/files?dir=/test             Folder "test" at the root
+/files?dir=/test/hello       Nested folder "hello" inside "test"
+/files?dir=/test/hello/      Trailing slash is normalized</code></pre>
+                        <ul class="list-disc pl-5 space-y-1">
+                            <li><code>dir=/</code> means the bucket root; <code>dir=/test</code> resolves the <em>first</em> folder named <code>test</code> at the root of your effective bucket.</li>
+                            <li>The effective bucket comes from the in-app bucket selector (persisted per browser). A bucket can also be forced with the legacy <code>?bucket_id=&amp;path=</code> parameters.</li>
+                            <li>Breadcrumb clicks, folder opens, and bucket switches rewrite the URL via <code>history.replaceState</code> — no reload.</li>
+                            <li>Refreshing or pasting a deep link re-resolves the path server-side and restores pagination/search. If the folder no longer exists, the UI falls back to the root.</li>
+                        </ul>
+                    </div>
+                </section>
+
+                <section id="preview" class="doc-anchor mb-10">
+                    <h3 class="text-lg font-bold text-gray-900 mb-3">File Preview</h3>
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-4 text-sm text-gray-600 leading-relaxed">
+                        <ul class="list-disc pl-5 space-y-1">
+                            <li>Double-click an image or video file (list or grid view), or use right-click → <span class="font-medium text-gray-900">View</span>, to open an inline preview.</li>
+                            <li>Images render in a modal; videos play with an inline player. A download button is available in the preview header.</li>
+                            <li>The UI loads previews through the <code>/api/files/:id/raw</code> endpoint (same access rules as download), so no separate permission is needed.</li>
+                            <li>Non-media files still download on double-click.</li>
+                        </ul>
+                    </div>
+                </section>
+
+                <!-- Operations -->
+                <section id="operations" class="doc-anchor mb-10">
+                    <h3 class="text-lg font-bold text-gray-900 mb-3">Docker Operations</h3>
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-4 text-sm text-gray-600 leading-relaxed">
+                        <p class="font-medium text-gray-900">Rebuild and deploy</p>
+<pre><code>docker compose -p keystone --env-file .env -f docker/docker-compose.yml up -d --build</code></pre>
+                        <p class="font-medium text-gray-900 mt-4">Logs / status</p>
+<pre><code>docker compose -p keystone -f docker/docker-compose.yml logs -f server
+docker exec keystone-postgres psql -U keystone -d keystone -c "SELECT version();"</code></pre>
+                        <p class="font-medium text-gray-900 mt-4">Backup</p>
+                        <p>Two things must be backed up together — they are the same backup unit:</p>
+                        <ul class="list-disc pl-5 space-y-1">
+                            <li><span class="font-medium text-gray-900">The database</span> — metadata, users, buckets, permissions:
+<pre><code>docker exec keystone-postgres pg_dump -U keystone -d keystone &gt; keystone-db.sql</code></pre></li>
+                            <li><span class="font-medium text-gray-900">The storage</span> — all content-addressed bytes. If <code>DATA_HOST_PATH</code> is empty (default named volume):
+<pre><code>docker run --rm -v keystone_storagedata:/data -v "$PWD":/backup alpine \
+  tar czf /backup/keystone-storage.tgz -C /data .</code></pre>
+                            If <code>DATA_HOST_PATH</code> points at a folder (<code>./data</code> etc.), that folder IS your storage — just copy/tar it like any normal directory (e.g. <code>tar czf keystone-storage.tgz data/</code>).</li>
+                        </ul>
+                        <p>Restore by replaying the dump into a fresh Postgres and unpacking the volume before starting the server. Backup the DB and storage at the same moment for a consistent snapshot.</p>
+                        <p class="font-medium text-gray-900 mt-4">Environment (from <code>.env.example</code>)</p>
+                        <ul class="list-disc pl-5 space-y-1">
+                            <li><code>SERVER_PORT</code> (default 3000), <code>APP_ENV</code>, <code>SERVER_HOST</code></li>
+                            <li><code>POSTGRES_*</code> — bare-metal DB URL is derived from them; compose wires the server to the <code>postgres</code> container automatically (override with <code>DATABASE_URL</code>/<code>KEYSTONE__DATABASE__URL</code>)</li>
+                            <li><code>JWT_SECRET</code>, <code>JWT_EXPIRY_MINUTES</code>, <code>REFRESH_EXPIRY_DAYS</code></li>
+                            <li><code>ENCRYPTION_TOKEN</code> — must be stable across restarts; rotating it invalidates encrypted values</li>
+                            <li><code>STORAGE_LOCAL_PATHS</code> (comma-separated; first is default), <code>STORAGE_MAX_UPLOAD_SIZE_MB</code></li>
+                            <li><code>DATA_HOST_PATH</code> — where storage lives <em>on the host</em>: empty = <code>storagedata</code> volume, <code>./data</code> = a folder in this project, or any absolute host path (see Storage Layout above)</li>
+                            <li><code>WORKER_*_INTERVAL_SECS</code> — GC, integrity verification, stats cadence</li>
+                            <li><code>CORS_ALLOWED_ORIGINS</code></li>
+                        </ul>
+                    </div>
+                </section>
+
+                <!-- API reference -->
+                <section id="api" class="doc-anchor mb-10">
+                    <h3 class="text-lg font-bold text-gray-900 mb-3">API Reference</h3>
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5 text-sm text-gray-600 leading-relaxed">
+                        <p>All endpoints (except <code>/auth/*</code> register/login/refresh and <code>/api/health/*</code>) require a bearer token:</p>
+<pre><code>Authorization: Bearer &lt;access_token&gt;</code></pre>
+                        <p>Admin endpoints require an admin role. Full request/response examples live in the repository README ("API Reference" section).</p>
+
+                        <div class="overflow-x-auto">
+                            <table class="min-w-full text-left text-sm">
+                                <thead>
+                                    <tr class="border-b border-gray-200 text-gray-500 text-xs uppercase tracking-wide">
+                                        <th class="py-2 pr-4">Method</th>
+                                        <th class="py-2 pr-4">Path</th>
+                                        <th class="py-2">Purpose</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-gray-100">
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-amber-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/register</td><td class="py-2">Create account (disabled when registration is blocked)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-amber-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/login</td><td class="py-2">Exchange credentials for access + refresh tokens</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-amber-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/refresh</td><td class="py-2">Rotate tokens with a refresh token</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-amber-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/logout</td><td class="py-2">Revoke the session</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-amber-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/forgot-password</td><td class="py-2">Request a password reset token</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-amber-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/reset-password</td><td class="py-2">Complete password reset with the emailed token</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-amber-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/change-password</td><td class="py-2">Change password (authenticated)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/me/permissions</td><td class="py-2">Your effective allow_api_keys / allow_password_change</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/buckets</td><td class="py-2">Buckets the caller can access</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/files</td><td class="py-2">Upload file (multipart)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/files?bucket=&amp;folder_id=&amp;page=</td><td class="py-2">List files (paginated)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/files/batch-move</td><td class="py-2">Move multiple files at once</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/files/batch-copy</td><td class="py-2">Copy multiple files at once</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/files/batch-delete</td><td class="py-2">Delete multiple files at once</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/files/:id</td><td class="py-2">File metadata</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/files/:id/download</td><td class="py-2">Download bytes (<code>Content-Disposition: attachment</code>)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/files/:id/raw</td><td class="py-2">Raw bytes inline (<code>Content-Disposition: inline</code>) — renders images, videos, PDFs in the browser</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/files/:id/verify</td><td class="py-2">Verify stored bytes match the recorded hash</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/files/:id/rename</td><td class="py-2">Rename file (name validated)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/files/:id/move</td><td class="py-2">Move file between folders</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/files/:id/copy</td><td class="py-2">Copy file (content-addressed dedup)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-rose-600">DELETE</td><td class="py-2 pr-4 font-mono text-xs">/api/files/:id</td><td class="py-2">Delete file (GC reclaims content when last reference is gone)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/folders?bucket=&amp;parent_id=</td><td class="py-2">List folder contents (files + folders)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/folders/all</td><td class="py-2">List all folders in a bucket (for building a tree)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/folders/resolve?bucket_id=&amp;path=</td><td class="py-2">Resolve a path (e.g. <code>/test/hello</code>) to a folder id</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/folders</td><td class="py-2">Create folder (name validated)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/folders/:id/rename</td><td class="py-2">Rename folder (name validated)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/folders/:id/move</td><td class="py-2">Move folder to a new parent</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-rose-600">DELETE</td><td class="py-2 pr-4 font-mono text-xs">/api/folders/:id</td><td class="py-2">Delete folder</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/api-keys</td><td class="py-2">Create API key</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/api-keys</td><td class="py-2">List own API keys</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/api-keys/revoke</td><td class="py-2">Revoke key</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/api-keys/regenerate</td><td class="py-2">Regenerate key</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/health</td><td class="py-2">Health check (no auth)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/health/ready</td><td class="py-2">Readiness (DB + storage, no auth)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/public/settings</td><td class="py-2">Public platform settings (no auth)</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <p class="mt-4">Quick check that the server is healthy:</p>
+<pre><code>curl -s http://localhost:3000/api/health/ready</code></pre>
+                    </div>
+                </section>
+
+                <!-- Errors -->
+                <section id="errors" class="doc-anchor mb-10">
+                    <h3 class="text-lg font-bold text-gray-900 mb-3">Error Format</h3>
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-4 text-sm text-gray-600 leading-relaxed">
+                        <p>Errors follow RFC 7807 Problem Details:</p>
+<pre><code>{
+  "type": "/errors/NOT_FOUND",
+  "title": "Resource Not Found",
+  "status": 404,
+  "detail": "resource not found: file not found"
+}</code></pre>
+                        <div class="overflow-x-auto">
+                            <table class="min-w-full text-left text-sm">
+                                <thead>
+                                    <tr class="border-b border-gray-200 text-gray-500 text-xs uppercase tracking-wide">
+                                        <th class="py-2 pr-4">Code</th>
+                                    <th class="py-2 pr-4">HTTP</th>
+                                    <th class="py-2">Meaning</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-100">
+                                <tr><td class="py-2 pr-4 font-mono text-xs">NOT_FOUND</td><td class="py-2 pr-4">404</td><td class="py-2">Resource does not exist</td></tr>
+                                <tr><td class="py-2 pr-4 font-mono text-xs">UNAUTHORIZED</td><td class="py-2 pr-4">401</td><td class="py-2">Authentication required or invalid</td></tr>
+                                <tr><td class="py-2 pr-4 font-mono text-xs">FORBIDDEN</td><td class="py-2 pr-4">403</td><td class="py-2">Insufficient permissions</td></tr>
+                                <tr><td class="py-2 pr-4 font-mono text-xs">BAD_REQUEST</td><td class="py-2 pr-4">400</td><td class="py-2">Invalid request body or parameters</td></tr>
+                                <tr><td class="py-2 pr-4 font-mono text-xs">CONFLICT</td><td class="py-2 pr-4">409</td><td class="py-2">Resource already exists (duplicate)</td></tr>
+                                <tr><td class="py-2 pr-4 font-mono text-xs">INTERNAL_ERROR</td><td class="py-2 pr-4">500</td><td class="py-2">Unexpected server error</td></tr>
+                                <tr><td class="py-2 pr-4 font-mono text-xs">STORAGE_ERROR</td><td class="py-2 pr-4">500</td><td class="py-2">Storage backend failure</td></tr>
+                                <tr><td class="py-2 pr-4 font-mono text-xs">VALIDATION_FAILED</td><td class="py-2 pr-4">422</td><td class="py-2">Input validation failed</td></tr>
+                            </tbody>
+                        </table>
+                        </div>
+                        <p class="mt-4">Every response carries <code>X-Request-ID</code> (UUID) for tracing and the CORS origin header. Include the request ID when reporting issues.</p>
+                    </div>
+                </section>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        function clearAuth() {
+            try { localStorage.removeItem('token'); } catch (e) {}
+            try { localStorage.removeItem('refresh_token'); } catch (e) {}
+            try { localStorage.removeItem('user'); } catch (e) {}
+        }
+        function sidebar() {
+            var u = null;
+            try { u = JSON.parse(localStorage.getItem('user') || 'null'); } catch (e) { u = null; }
+            return {
+                user: u,
+                userName: u ? u.username : '',
+                userEmail: u ? u.email : '',
+                userInitial: u && u.username ? u.username.charAt(0).toUpperCase() : '?',
+                themeDark: document.documentElement.classList.contains('dark'),
+                toggleTheme: function() {
+                    this.themeDark = !this.themeDark;
+                    document.documentElement.classList.toggle('dark', this.themeDark);
+                    try { localStorage.setItem('theme', this.themeDark ? 'dark' : 'light'); } catch (e) {}
+                },
+                active: function(p) { return window.location.pathname === p; },
+                logout: function() {
+                    // Revoke the server-side session (httpOnly refresh cookie) if possible.
+                    try { fetch('/auth/logout', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' }); } catch (e) {}
+                    clearAuth();
+                    window.location.href = '/login';
+                },
+                sidebarOpen: false,
+                toggleSidebar: function() { this.sidebarOpen = !this.sidebarOpen; },
+                closeSidebar: function() { this.sidebarOpen = false; }
+            };
+        }
+        function docsApp() {
+            return {
+                isAdmin: false,
+                activeSection: 'overview',
+                init: function() {
+                    var token = null;
+                    try { token = localStorage.getItem('token'); } catch (e) {}
+                    var u = null;
+                    try { u = JSON.parse(localStorage.getItem('user') || 'null'); } catch (e) { u = null; }
+                    if (!token || !u) {
+                        clearAuth();
+                        window.location.href = '/login';
+                        return;
+                    }
+                    this.isAdmin = u.role === 'admin';
+                    var self = this;
+                    var mainEl = this.$el;
+                    // start from the URL hash if present (e.g. /docs#storage)
+                    if (window.location.hash) {
+                        var h = window.location.hash.slice(1);
+                        var target = document.getElementById(h);
+                        if (target) {
+                            this.activeSection = h;
+                            // sections are hidden until Alpine renders isAdmin,
+                            // so scroll explicitly after the DOM updates
+                            this.$nextTick(function() {
+                                target.scrollIntoView({ behavior: 'auto', block: 'start' });
+                            });
+                        }
+                    }
+                    var updateActive = function() {
+                        var sections = mainEl.querySelectorAll('section.doc-anchor');
+                        var current = 'overview';
+                        var offset = 120; // sticky nav offset from the top
+                        sections.forEach(function(s) {
+                            var rect = s.getBoundingClientRect();
+                            if (rect.top <= offset) current = s.id;
+                        });
+                        if (current !== self.activeSection) {
+                            self.activeSection = current;
+                            // keep the URL hash in sync (no scroll jump)
+                            try {
+                                history.replaceState(null, '', '#' + current);
+                            } catch (e) {}
+                        }
+                    };
+                    mainEl.addEventListener('scroll', updateActive, { passive: true });
+                    window.addEventListener('resize', updateActive);
+                    // run after Alpine shows the admin content (sections hidden
+                    // until then -> their rects would all be 0)
+                    this.$nextTick(function() {
+                        updateActive();
+                    });
+                }
+            };
+        }
+        // restore saved theme before Alpine renders
+        (function() {
+            var savedTheme = null;
+            try { savedTheme = localStorage.getItem('theme'); } catch (e) {}
+            if (savedTheme === 'dark') {
+                document.documentElement.classList.add('dark');
+            }
+        })();
+    </script>
+</body>
+</html>
