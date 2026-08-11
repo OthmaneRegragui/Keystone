@@ -82,6 +82,13 @@ if [[ -n "${DATA_HOST_PATH:-}" && "${DATA_HOST_PATH:0:1}" != "/" ]]; then
   export DATA_HOST_PATH="$(pwd)/${DATA_HOST_PATH}"
 fi
 
+# Same for SERVER_PORT: the published host port (default 3000). .env is only
+# read by compose, so read it here to print the real URL after starting.
+if [[ -z "${SERVER_PORT:-}" && -f .env ]]; then
+  SERVER_PORT="$(sed -n 's/^SERVER_PORT=//p' .env | tail -n1)"
+fi
+SERVER_PORT="${SERVER_PORT:-3000}"
+
 # --- first-run setup -------------------------------------------------------
 if [ ! -f .env ]; then
   cp .env.example .env
@@ -110,7 +117,7 @@ cmd_up() {
   compose ps
   echo
   echo "============================================"
-  echo "  Keystone is running: http://localhost:3000"
+  echo "  Keystone is running: http://localhost:$SERVER_PORT"
   echo "  Run ./docker-run.sh again to update it."
   echo "  Logs: ./docker-run.sh logs"
   echo "============================================"
@@ -177,7 +184,7 @@ cmd_db_reset() {
   compose ps
   echo
   echo "============================================"
-  echo "  Database reset. Keystone restarted: http://localhost:3000"
+  echo "  Database reset. Keystone restarted: http://localhost:$SERVER_PORT"
   echo "  Go to /setup to create your first admin user."
   echo "============================================"
 }
