@@ -9,15 +9,14 @@ services:
       postgres:
         condition: service_healthy
     # Publish the API to the host on SERVER_PORT (default 3000). The container
-    # listens on the same port because KEYSTONE__SERVER__PORT is set from
-    # SERVER_PORT below, so changing SERVER_PORT in .env moves the whole service.
+    # always listens on port 3000; only the host-side port follows SERVER_PORT.
     ports:
-      - "${SERVER_PORT:-3000}:${SERVER_PORT:-3000}"
+      - "${SERVER_PORT:-3000}:3000"
     # Run the server as PID 1 via tini so zombie processes are reaped and
     # signals are forwarded correctly.
     init: true
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:${SERVER_PORT:-3000}/api/health/ready"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/api/health/ready"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -26,7 +25,6 @@ services:
       - ../.env
     environment:
       - KEYSTONE__SERVER__HOST=0.0.0.0
-      - KEYSTONE__SERVER__PORT=${SERVER_PORT:-3000}
       - APP_ENV=production
       # Storage base directory INSIDE the container — read from .env
       # (STORAGE_LOCAL_PATHS), default /mnt/keystone/data. MUST be an absolute
