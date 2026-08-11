@@ -130,7 +130,14 @@ docker run --rm -v keystone_storagedata:/from -v "$PWD/data":/to alpine \
 ./docker-run.sh
 ```
 
-The `1000:1000` ownership matches the container's non-root `keystone` user so it can write into the folder. After verifying uploads work, you can free the old volume with `docker volume rm keystone_storagedata` — but only after confirming, since until then it holds the only copy of your files.
+Ownership is fixed automatically at startup: the container's entrypoint runs as
+root, `chown`s `STORAGE_LOCAL_PATHS` (the container-side path) to the non-root
+`keystone` user, then drops privileges before starting the server. So the
+`1000:1000` in the copy above is only needed if you want the host folder to be
+writable by your own user too — the server itself works regardless of who owns
+the mount. After verifying uploads work, you can free the old volume with
+`docker volume rm keystone_storagedata` — but only after confirming, since until
+then it holds the only copy of your files.
 
 ### Workers
 

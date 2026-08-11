@@ -33,8 +33,13 @@ COPY --from=builder /app/target/release/keystone /app/server
 RUN mkdir -p /mnt/keystone/data && \
     chown -R keystone:keystone /mnt/keystone
 
-USER keystone
+# The entrypoint starts as root so it can make the mounted storage volume
+# writable by the `keystone` user (a mounted volume hides the chown above),
+# then drops privileges via setpriv and execs the server.
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 EXPOSE 3000
 
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["/app/server"]

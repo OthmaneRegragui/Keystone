@@ -14,4 +14,3 @@ Makefile
 rustfmt.toml
 clippy.toml
 run.sh
-docker/
