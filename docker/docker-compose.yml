@@ -8,6 +8,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+        # The bundled Postgres is optional: when POSTGRES_HOST points at an
+        # external database the `db` profile is not enabled, and the server
+        # simply connects there instead (see the POSTGRES_HOST comment below).
+        required: false
     # Publish the API to the host on SERVER_PORT (default 3000). The container
     # always listens on port 3000; only the host-side port follows SERVER_PORT.
     ports:
@@ -32,11 +36,15 @@ services:
       #   $STORAGE_LOCAL_PATHS/<storage-path-slug>/<bucket-name>/<blake3-shards>
       # e.g. /mnt/keystone/data/test1/test1/fc/bd/<blake3-hash>
       - STORAGE_LOCAL_PATHS=${STORAGE_LOCAL_PATHS:-/mnt/keystone/data}
-      # NOTE: if POSTGRES_PASSWORD contains URL-special characters (@ : / %),
-      # this URL must be percent-encoded manually, or set KEYSTONE__DATABASE__URL
-      # yourself. The server percent-encodes the password when it derives the
-      # URL from POSTGRES_* (bare-metal mode), but compose builds the URL above.
-      - KEYSTONE__DATABASE__URL=postgres://${POSTGRES_USER:-keystone}:${POSTGRES_PASSWORD:-keystone}@postgres:5432/${POSTGRES_DB:-keystone}
+      # Database — every connection setting comes from .env. The server derives
+      # the URL itself from POSTGRES_HOST/PORT/USER/PASSWORD/DB (via env_file)
+      # and percent-encodes the password, so symbols like @ : / % just work.
+      # POSTGRES_HOST is the switch:
+      #   - "postgres" or unset -> use the bundled `postgres` service (profile
+      #                             `db`, enabled automatically by docker-run.sh)
+      #   - any other host      -> connect to an existing Postgres; the bundled
+      #                            container is not started
+      - POSTGRES_HOST=${POSTGRES_HOST:-postgres}
     volumes:
       # Where files live OUTSIDE the container is set with DATA_HOST_PATH in .env
       # (only the mount source changes — the server always sees STORAGE_LOCAL_PATHS):
@@ -50,10 +58,23 @@ services:
       # (see README "Storage"), then set DATA_HOST_PATH and restart.
       - ${DATA_HOST_PATH:-storagedata}:${STORAGE_LOCAL_PATHS:-/mnt/keystone/data}
 
+  # Optional "create one" Postgres: only started when the `db` profile is
+  # enabled (docker-run.sh does that automatically when POSTGRES_HOST is unset
+  # or "postgres"). With an external POSTGRES_HOST this service stays down.
   postgres:
     image: postgres:16-alpine
     container_name: keystone-postgres
     restart: unless-stopped
+    profiles: ["db"]
+    # Listen on POSTGRES_PORT inside the container too, so the port you set in
+    # .env is the one the server connects to (it derives the URL from the same
+    # var). Default 5432, matching the app's bare-metal default. Note: this only
+    # affects the port — the pgdata volume holds no port settings, so changing
+    # POSTGRES_PORT later is safe (unlike POSTGRES_PASSWORD).
+    command:
+      - postgres
+      - -p
+      - ${POSTGRES_PORT:-5432}
     environment:
       # Change these from the defaults in ../.env before going live — the
       # `server` service refuses to start in production with placeholder
@@ -65,16 +86,15 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-keystone} -d ${POSTGRES_DB:-keystone}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-keystone} -d ${POSTGRES_DB:-keystone} -p ${POSTGRES_PORT:-5432}"]
       interval: 5s
       timeout: 5s
       retries: 10
-    # Publish Postgres to the host on POSTGRES_PORT (default 5433 so it can
-    # never collide with a local Postgres on 5432). The container port stays
-    # 5432; only the host-side port is configurable. Set POSTGRES_PORT=5432
-    # in ../.env to use the standard port, or any free port.
+    # Publish Postgres to the host on the same POSTGRES_PORT. Set POSTGRES_PORT
+    # in ../.env (default 5433 in .env.example) if 5432 would collide with a
+    # local Postgres.
     ports:
-      - "${POSTGRES_PORT:-5433}:5432"
+      - "${POSTGRES_PORT:-5432}:${POSTGRES_PORT:-5432}"
 
 volumes:
   storagedata:

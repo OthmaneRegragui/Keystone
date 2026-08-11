@@ -59,8 +59,8 @@ STORAGE_LOCAL_PATHS=/mnt/disk1/storage,/mnt/disk2/storage
 | Value | Database | Description |
 |-------|----------|-------------|
 | `test` | PostgreSQL (`keystone_test`) | Fast, isolated tests. Requires a running Postgres (see [Database](#database)). |
-| `development` | PostgreSQL (`keystone`) | Local dev with persistent data: `postgres://keystone:keystone@localhost:5432/keystone`. |
-| `production` | PostgreSQL | Requires `KEYSTONE__DATABASE__URL` to be set. |
+| `development` | PostgreSQL (`keystone`) | Local dev with persistent data, derived from `POSTGRES_*`. |
+| `production` | PostgreSQL | The URL is derived from `POSTGRES_*` too, or set `KEYSTONE__DATABASE__URL` explicitly. |
 
 ## Configuration
 
@@ -77,9 +77,14 @@ All settings use the `KEYSTONE__` prefix with `__` as the separator (e.g., `KEYS
 
 ### Database
 
+The connection URL is derived from `POSTGRES_*` (percent-encoded automatically, so symbol-laden passwords work):
+
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `KEYSTONE__DATABASE__URL` | PostgreSQL connection URL | Per `APP_ENV` |
+| `POSTGRES_HOST` | Postgres host. In docker `postgres` (or unset) uses the bundled container; any other host connects to an existing database | bare-metal: `localhost`, docker: `postgres` |
+| `POSTGRES_PORT` | Postgres port (docker: container + host-published + derived URL) | `5433` in `.env.example` |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Credentials and database name | `keystone` |
+| `DATABASE_URL` / `KEYSTONE__DATABASE__URL` | Explicit connection URL — overrides the derivation | Per `APP_ENV` |
 | `KEYSTONE__DATABASE__MAX_CONNECTIONS` | Max pool connections | `10` |
 | `KEYSTONE__DATABASE__MIN_CONNECTIONS` | Min pool connections | `1` |
 
@@ -593,10 +598,10 @@ docker compose --env-file .env -f docker/docker-compose.yml up --build
 - Multi-stage build (builder: `rust:1.75-slim`, runtime: `debian:bookworm-slim`)
 - Runs as non-root `keystone` user
 - Exposes port 3000
-- Containers: `keystone-server` (app) and `keystone-postgres` (PostgreSQL) — prefixed names avoid collisions with existing containers
-- Volumes: `pgdata` (PostgreSQL data). File storage is either the `storagedata` volume or a host folder you choose with `DATA_HOST_PATH` in `.env` (see [Storage](#storage))
-- The `server` service is pointed at the `postgres` container automatically via `KEYSTONE__DATABASE__URL` (built from `POSTGRES_*` in `.env`)
-- PostgreSQL runs on `postgres:16-alpine`; its port is intentionally not published to the host so it never conflicts with a Postgres you already run
+- Containers: `keystone-server` (app) and, when using the bundled database, `keystone-postgres` — prefixed names avoid collisions with existing containers
+- Volumes: `pgdata` (bundled PostgreSQL data). File storage is either the `storagedata` volume or a host folder you choose with `DATA_HOST_PATH` in `.env` (see [Storage](#storage))
+- All database settings come from `POSTGRES_*` in `.env`. `POSTGRES_HOST` decides the target: unset or `postgres` uses the bundled container (enabled via the `db` compose profile); any other host connects to an existing Postgres and the bundled one is not started. The server percent-encodes every URL component, so symbol-laden passwords (`@ : / %`) just work
+- The bundled PostgreSQL runs on `postgres:16-alpine` on `POSTGRES_PORT` (default 5432; `.env.example` ships 5433 so it cannot collide with a local Postgres). The same port is used inside the container, on the host and in the server's derived URL
 
 ### Reset the Database
 

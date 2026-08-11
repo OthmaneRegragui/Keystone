@@ -418,13 +418,12 @@ fn url_encode_component(input: &str) -> String {
 /// Precedence:
 /// 1. `DATABASE_URL` if explicitly set
 /// 2. Derived from `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB`/
-///    `POSTGRES_PORT` when those are set (so bare-metal runs don't need a
-///    hand-maintained `DATABASE_URL`)
+///    `POSTGRES_PORT`/`POSTGRES_HOST` when those are set (bare-metal and docker
+///    alike — compose only adds `POSTGRES_HOST=postgres`)
 /// 3. The per-environment built-in default
 ///
-/// Note: `KEYSTONE__DATABASE__URL` (used by docker-compose to point at the
-/// `postgres` container) is read by the config crate's env source below and
-/// always overrides the value set here.
+/// Note: `KEYSTONE__DATABASE__URL` (an explicit override) is read by the config
+/// crate's env source below and always overrides the value set here.
 fn resolve_database_url(app_env: AppEnv) -> String {
     if let Ok(url) = std::env::var("DATABASE_URL") {
         if !url.trim().is_empty() {
@@ -435,6 +434,14 @@ fn resolve_database_url(app_env: AppEnv) -> String {
     let postgres_user = std::env::var("POSTGRES_USER").ok();
     let postgres_password = std::env::var("POSTGRES_PASSWORD").ok();
     let postgres_db = std::env::var("POSTGRES_DB").ok();
+    // POSTGRES_HOST defaults to localhost for bare-metal runs; docker-compose
+    // sets it to `postgres` so the container points at the DB service. Because
+    // the URL is built here, the password (and all other components) are
+    // percent-encoded — symbol-laden passwords never corrupt the URL.
+    let postgres_host = std::env::var("POSTGRES_HOST")
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+        .unwrap_or_else(|| String::from("localhost"));
 
     if let (Some(user), Some(password), Some(db)) = (postgres_user, postgres_password, postgres_db) {
         if !user.trim().is_empty() && !db.trim().is_empty() {
@@ -442,14 +449,15 @@ fn resolve_database_url(app_env: AppEnv) -> String {
                 .ok()
                 .and_then(|p| p.trim().parse::<u16>().ok())
                 .unwrap_or(5432);
-            // Percent-encode the userinfo and database components so passwords
-            // containing `@`, `:`, `/`, `%` or other URL-special characters
-            // cannot corrupt the connection URL or be reinterpreted as
-            // separators (sqlx decodes the percent-encoded components).
+            // Percent-encode the userinfo, host and database components so
+            // passwords containing `@`, `:`, `/`, `%` or other URL-special
+            // characters cannot corrupt the connection URL or be reinterpreted
+            // as separators (sqlx decodes the percent-encoded components).
             return format!(
-                "postgres://{}:{}@localhost:{}/{}",
+                "postgres://{}:{}@{}:{}/{}",
                 url_encode_component(user.trim()),
                 url_encode_component(password.trim()),
+                url_encode_component(postgres_host.trim()),
                 port,
                 url_encode_component(db.trim()),
             );
@@ -574,7 +582,7 @@ mod tests {
         } else {
             std::env::remove_var("JWT_SECRET");
         }
-        for k in ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "POSTGRES_PORT"] {
+        for k in ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "POSTGRES_PORT", "POSTGRES_HOST"] {
             if !prev_keys.contains(k) {
                 std::env::remove_var(k);
             }
@@ -605,7 +613,7 @@ mod tests {
         for (k, v) in prev {
             std::env::set_var(k, v);
         }
-        for k in ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "POSTGRES_PORT"] {
+        for k in ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "POSTGRES_PORT", "POSTGRES_HOST"] {
             if !prev_keys.contains(k) {
                 std::env::remove_var(k);
             }
@@ -705,6 +713,38 @@ mod tests {
     }
 
     #[test]
+    fn test_database_url_uses_postgres_host() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev: Vec<(String, String)> = std::env::vars()
+            .filter(|(k, _)| k.starts_with("KEYSTONE") || k.starts_with("POSTGRES_") || k == "DATABASE_URL")
+            .collect();
+        let prev_keys: std::collections::HashSet<String> = prev.iter().map(|(k, _)| k.clone()).collect();
+        for (k, _) in &prev {
+            std::env::remove_var(k);
+        }
+        std::env::set_var("POSTGRES_USER", "user");
+        std::env::set_var("POSTGRES_PASSWORD", "p@ss");
+        std::env::set_var("POSTGRES_DB", "db");
+        std::env::set_var("POSTGRES_PORT", "5432");
+        std::env::set_var("POSTGRES_HOST", "postgres");
+
+        let settings = Settings::load().expect("settings should load");
+        assert_eq!(
+            settings.database.url,
+            "postgres://user:p%40ss@postgres:5432/db"
+        );
+
+        for (k, v) in prev {
+            std::env::set_var(k, v);
+        }
+        for k in ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "POSTGRES_PORT", "POSTGRES_HOST"] {
+            if !prev_keys.contains(k) {
+                std::env::remove_var(k);
+            }
+        }
+    }
+
+    #[test]
     fn test_database_url_encodes_special_chars_in_password() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev: Vec<(String, String)> = std::env::vars()
@@ -728,7 +768,7 @@ mod tests {
         for (k, v) in prev {
             std::env::set_var(k, v);
         }
-        for k in ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "POSTGRES_PORT"] {
+        for k in ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "POSTGRES_PORT", "POSTGRES_HOST"] {
             if !prev_keys.contains(k) {
                 std::env::remove_var(k);
             }

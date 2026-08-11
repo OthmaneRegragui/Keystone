@@ -68,7 +68,20 @@ else
   exit 1
 fi
 
-compose() { "${COMPOSE_BIN[@]}" -p "$PROJECT" --env-file .env -f "$COMPOSE_FILE" "$@"; }
+# The bundled Postgres is optional. When POSTGRES_HOST is unset or "postgres"
+# the server uses the compose `postgres` service, so enable its `db` profile.
+# An external POSTGRES_HOST connects to an existing database instead and the
+# bundled container stays down. .env is only read by compose, so read it here.
+PG_HOST="${POSTGRES_HOST:-}"
+if [[ -z "$PG_HOST" && -f .env ]]; then
+  PG_HOST="$(sed -n 's/^POSTGRES_HOST=//p' .env | tail -n1)"
+fi
+DB_PROFILE=()
+if [[ -z "$PG_HOST" || "$PG_HOST" == "postgres" ]]; then
+  DB_PROFILE=(--profile db)
+fi
+
+compose() { "${COMPOSE_BIN[@]}" -p "$PROJECT" --env-file .env -f "$COMPOSE_FILE" "${DB_PROFILE[@]}" "$@"; }
 
 # DATA_HOST_PATH decides where files live on the host (outside the container).
 # Anchoring relative values (like ./data) to the project root makes them behave
@@ -147,18 +160,26 @@ cmd_reset() {
 }
 
 cmd_db_reset() {
-  # Make sure the postgres container is running so we can wipe the database.
+  # Make sure the bundled postgres container is running so we can wipe the
+  # database. This only makes sense with the bundled DB — when POSTGRES_HOST
+  # points at an external database, manage it yourself.
   if ! docker ps --format '{{.Names}}' | grep -qx 'keystone-postgres'; then
     echo "error: the 'keystone-postgres' container is not running."
     echo "       start the stack first: ./docker-run.sh" >&2
+    echo "       (db-reset only works with the bundled Postgres; if you use an"
+    echo "        external POSTGRES_HOST, reset that database yourself)" >&2
     exit 1
   fi
 
-  # Read POSTGRES_USER/POSTGRES_DB from .env unless already exported.
+  # Read POSTGRES_USER/POSTGRES_DB/POSTGRES_PORT from .env unless already
+  # exported. The port is needed because the postgres container listens on
+  # POSTGRES_PORT, not a fixed 5432.
   PGUSER="${POSTGRES_USER:-$(grep -E '^POSTGRES_USER=' .env | tail -1 | cut -d= -f2)}"
   PGUSER="${PGUSER:-keystone}"
   PGDATABASE="${POSTGRES_DB:-$(grep -E '^POSTGRES_DB=' .env | tail -1 | cut -d= -f2)}"
   PGDATABASE="${PGDATABASE:-keystone}"
+  PGPORT="${POSTGRES_PORT:-$(grep -E '^POSTGRES_PORT=' .env | tail -1 | cut -d= -f2)}"
+  PGPORT="${PGPORT:-5432}"
 
   echo "This will DELETE ALL DATA in the '$PGDATABASE' database:"
   echo "users, files, folders, api keys, buckets, groups and admin settings."
@@ -171,7 +192,7 @@ cmd_db_reset() {
   compose stop server
 
   echo ">> dropping schema in database '$PGDATABASE'..."
-  if ! compose exec -T postgres psql -v ON_ERROR_STOP=1 -U "$PGUSER" -d "$PGDATABASE" \
+  if ! compose exec -T postgres psql -p "$PGPORT" -v ON_ERROR_STOP=1 -U "$PGUSER" -d "$PGDATABASE" \
       -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"; then
     echo "error: failed to reset the database" >&2
     compose start server >/dev/null 2>&1 || true
