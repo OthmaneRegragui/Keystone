@@ -82,7 +82,7 @@ The connection URL is derived from `POSTGRES_*` (percent-encoded automatically, 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `POSTGRES_HOST` | Postgres host. In docker `postgres` (or unset) uses the bundled container; any other host connects to an existing database | bare-metal: `localhost`, docker: `postgres` |
-| `POSTGRES_PORT` | Postgres port (docker: container + host-published + derived URL) | `5433` in `.env.example` |
+| `POSTGRES_PORT` | "Outside" (host-published) port of the bundled Postgres. The container always listens on 5432 internally and the server connects there; only the host port follows this | `5433` in `.env.example` |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Credentials and database name | `keystone` |
 | `DATABASE_URL` / `KEYSTONE__DATABASE__URL` | Explicit connection URL — overrides the derivation | Per `APP_ENV` |
 | `KEYSTONE__DATABASE__MAX_CONNECTIONS` | Max pool connections | `10` |
@@ -601,7 +601,7 @@ docker compose --env-file .env -f docker/docker-compose.yml up --build
 - Containers: `keystone-server` (app) and, when using the bundled database, `keystone-postgres` — prefixed names avoid collisions with existing containers
 - Volumes: `pgdata` (bundled PostgreSQL data). File storage is either the `storagedata` volume or a host folder you choose with `DATA_HOST_PATH` in `.env` (see [Storage](#storage))
 - All database settings come from `POSTGRES_*` in `.env`. `POSTGRES_HOST` decides the target: unset or `postgres` uses the bundled container (enabled via the `db` compose profile); any other host connects to an existing Postgres and the bundled one is not started. The server percent-encodes every URL component, so symbol-laden passwords (`@ : / %`) just work
-- The bundled PostgreSQL runs on `postgres:16-alpine` on `POSTGRES_PORT` (default 5432; `.env.example` ships 5433 so it cannot collide with a local Postgres). The same port is used inside the container, on the host and in the server's derived URL
+- The bundled PostgreSQL runs on `postgres:16-alpine`. It always listens on 5432 inside the compose network; `POSTGRES_PORT` in `.env` (default 5433 in `.env.example`) is only the host-published port it is mapped to
 
 ### Reset the Database
 
