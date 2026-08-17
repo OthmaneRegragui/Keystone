@@ -23,5 +23,6 @@ pub struct Bucket {
 pub struct PlatformSettings {
     pub block_registrations: bool,
     pub allow_user_api_keys: bool,
+    pub allow_user_bots: bool,
     pub allow_user_password_change: bool,
 }

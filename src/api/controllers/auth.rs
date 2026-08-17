@@ -252,13 +252,14 @@ pub async fn logout(
     body: Option<Json<RefreshRequest>>,
 ) -> AppResult<(HeaderMap, Json<MessageResponse>)> {
     if let Some(presented) = resolve_refresh_token(&headers, body.as_deref()) {
-        if let Ok(refresh) = state
+        // A presented refresh token must be valid — refusing a bogus one (401)
+        // prevents the endpoint from being used as an oracle or silently
+        // "succeeding" a logout that never happened.
+        let refresh = state
             .session_service
             .validate_refresh_token(&presented)
-            .await
-        {
-            state.session_service.revoke_token(refresh.id).await?;
-        }
+            .await?;
+        state.session_service.revoke_token(refresh.id).await?;
     }
 
     let headers = HeaderMap::from_iter([(
@@ -368,14 +369,15 @@ pub async fn change_password(
 
 /// Effective capability flags for the authenticated user, so the account UI can
 /// show/hide the API key and password change sections correctly.
-/// Admins always have both. Non-admins follow the group policy when they belong
-/// to at least one group (ANY group allows), otherwise the global setting.
+/// Admins always have all three. Non-admins follow the group policy when they
+/// belong to at least one group (ANY group allows), otherwise the global
+/// setting.
 pub async fn account_permissions(
     State(state): State<Arc<AppState>>,
     auth: crate::api::extractors::AuthUser,
 ) -> AppResult<Json<AccountPermissionsDto>> {
-    let (allow_api_keys, allow_password_change) = if auth.is_admin() {
-        (true, true)
+    let (allow_api_keys, allow_password_change, allow_bots) = if auth.is_admin() {
+        (true, true, true)
     } else {
         let user_id = auth.user_id.to_string();
         let user_groups = GroupRepository::list_user_groups(state.db.pool(), &user_id).await?;
@@ -383,16 +385,19 @@ pub async fn account_permissions(
             (
                 AdminSettingRepository::get_bool(state.db.pool(), "allow_user_api_keys").await?,
                 AdminSettingRepository::get_bool(state.db.pool(), "allow_user_password_change").await?,
+                AdminSettingRepository::get_bool(state.db.pool(), "allow_user_bots").await?,
             )
         } else {
             (
                 GroupRepository::user_allows_api_keys(state.db.pool(), &user_id).await?,
                 GroupRepository::user_allows_password_change(state.db.pool(), &user_id).await?,
+                GroupRepository::user_allows_bots(state.db.pool(), &user_id).await?,
             )
         }
     };
     Ok(Json(AccountPermissionsDto {
         allow_api_keys,
         allow_password_change,
+        allow_bots,
     }))
 }

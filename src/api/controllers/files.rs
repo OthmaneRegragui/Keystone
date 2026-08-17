@@ -6,11 +6,11 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use crate::error::{AppError, AppResult};
-use crate::models::File;
+use crate::models::{File, UserFile};
 use crate::db::rows::{CreateStorageObjectData, FileRecord, FolderRecord, UserFileRecord};
 use crate::db::repos::{
-    buckets::AccessibleBucket, BucketRepository, FileRepository, FolderRepository,
-    StorageObjectRepository, UserFileRepository, UserRepository,
+    buckets::AccessibleBucket, BotRepository, BucketRepository, FileRepository,
+    FolderRepository, StorageObjectRepository, UserFileRepository, UserRepository,
 };
 use crate::utils::hashing::blake3::hash_bytes;
 use crate::utils::names::validate_component_name;
@@ -18,7 +18,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::dto::*;
-use crate::api::extractors::AuthUser;
+use crate::api::extractors::{AuthUser, BotCapability};
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -207,6 +207,80 @@ fn bucket_limit_allows(bucket: &AccessibleBucket, bucket_used: i64, additional: 
         || bucket_used.saturating_add(additional) <= bucket.user_storage_limit
 }
 
+/// Charge a bot's lifetime upload cap for a successful upload. Non-bot requests
+/// pass through untouched.
+async fn charge_bot_upload(state: &AppState, auth: &AuthUser, bytes: i64) -> AppResult<()> {
+    if let Some(bot) = &auth.bot {
+        if !BotRepository::charge_uploaded_bytes(state.db.pool(), bot.key_id, bytes).await? {
+            return Err(AppError::Forbidden(format!(
+                "bot '{}' upload limit reached",
+                bot.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Bot folder access check based on the folder's full path. The folder (and
+/// every descendant) is reachable when the bot's path rules cover the path;
+/// unrestricted bots always pass. Prefix matching replaces the old ancestor
+/// walk — an allow rule on `/a` covers `/a/b/c`.
+async fn require_bot_folder_access_ancestors(
+    state: &AppState,
+    auth: &AuthUser,
+    folder: &crate::models::UserFolder,
+) -> AppResult<()> {
+    let Some(bot) = &auth.bot else {
+        return Ok(());
+    };
+    let chain = FolderRepository::get_path(state.db.pool(), folder.id).await?;
+    let rel = chain
+        .iter()
+        .map(|(_, name)| name.as_str())
+        .collect::<Vec<_>>()
+        .join("/");
+    let path = format!("/{rel}");
+    if !bot.path_allowed(&folder.bucket_name, &path) {
+        return Err(AppError::Forbidden(format!(
+            "bot '{}' cannot access folder '{}'",
+            bot.name, folder.name
+        )));
+    }
+    Ok(())
+}
+
+/// Bot access check against a single user-file. The file's full path (folder
+/// path + original name, or `/name` at root) is evaluated against the bot's
+/// path rules. Private files (no bucket) are always reachable, matching the
+/// old allow-list behaviour.
+async fn require_bot_file_access(state: &AppState, auth: &AuthUser, uf: &UserFile) -> AppResult<()> {
+    let Some(bot) = &auth.bot else {
+        return Ok(());
+    };
+    let Some(bucket) = uf.bucket_name.as_deref() else {
+        return Ok(());
+    };
+    let path = match uf.folder_id {
+        Some(fid) => {
+            let chain = FolderRepository::get_path(state.db.pool(), fid).await?;
+            let rel = chain
+                .iter()
+                .map(|(_, name)| name.as_str())
+                .collect::<Vec<_>>()
+                .join("/");
+            format!("/{rel}/{}", uf.original_name)
+        }
+        None => format!("/{}", uf.original_name),
+    };
+    if !bot.path_allowed(bucket, &path) {
+        return Err(AppError::Forbidden(format!(
+            "bot '{}' cannot access this file",
+            bot.name
+        )));
+    }
+    Ok(())
+}
+
 /// Upload a file. Content-addressed deduplication is applied:
 /// - If the same content (blake3 hash) already exists on the backend, only a new
 ///   user_files entry is created (no duplicate blob stored).
@@ -217,6 +291,7 @@ pub async fn upload(
     mut multipart: Multipart,
 ) -> AppResult<Json<UploadResponse>> {
     auth_user.require_scope("files:write")?;
+    auth_user.require_bot_capability(BotCapability::Upload)?;
 
     // Enforce the configured upload size limit while streaming the body — the
     // file payload is never buffered beyond this bound, so a client cannot
@@ -325,13 +400,16 @@ pub async fn upload(
         }
     };
 
+    // Bots must be restricted to their allowed buckets, even when no bucket was
+    // explicitly requested (the default-pick above must respect the allow-list).
+    auth_user.require_bot_bucket(&backend_name)?;
+
     let backend = {
         let storage = state.storage.read().await;
         storage
             .get(&backend_name)
             .ok_or_else(|| AppError::Internal(format!("storage backend '{}' not found", backend_name)))?
     };
-
     let hash = hash_bytes(&data).await;
 
     // Check if a physical file with this hash already exists (deduplication).
@@ -377,10 +455,23 @@ pub async fn upload(
                 folder.name, backend_name
             )));
         }
+        require_bot_folder_access_ancestors(&state, &auth_user, &folder).await?;
         Some(uuid)
     } else {
         None
     };
+
+    // A bot uploading to the bucket root must be able to access the root path.
+    if resolved_folder_id.is_none() {
+        if let Some(bot) = &auth_user.bot {
+            if !bot.path_allowed(&backend_name, "") {
+                return Err(AppError::Forbidden(format!(
+                    "bot '{}' cannot upload to the root of bucket '{}'",
+                    bot.name, backend_name
+                )));
+            }
+        }
+    }
 
     // Pre-insert duplicate check: if the user already has an ACTIVE user_files
     // row for (user_id, file_id, original_name), the unique index
@@ -421,6 +512,8 @@ pub async fn upload(
         let user_file = UserFileRepository::find_by_id(state.db.pool(), existing_uf.id)
             .await?
             .ok_or_else(|| AppError::Internal("user_file not found after update".to_string()))?;
+
+        charge_bot_upload(&state, &auth_user, data.len() as i64).await?;
 
         return Ok(Json(UploadResponse {
             file: file_dto_from_user_file(&user_file, &file),
@@ -505,6 +598,8 @@ pub async fn upload(
         return Err(AppError::BadRequest("storage quota exceeded".into()));
     }
 
+    charge_bot_upload(&state, &auth_user, data.len() as i64).await?;
+
     Ok(Json(UploadResponse {
         file: file_dto_from_user_file(&user_file, &file),
         duplicate: existing_physical.is_some(),
@@ -518,6 +613,10 @@ pub async fn list_files(
     Query(params): Query<ListFilesParams>,
 ) -> AppResult<Json<FileListDto>> {
     auth_user.require_scope("files:read")?;
+    auth_user.require_bot_capability(BotCapability::List)?;
+    if let Some(bucket) = params.bucket.as_deref() {
+        auth_user.require_bot_bucket(bucket)?;
+    }
     // Clamp pagination so `(page - 1) * per_page` can never overflow and the
     // query stays bounded.
     let page = params.page.unwrap_or(1).clamp(1, 1_000_000);
@@ -542,9 +641,9 @@ pub async fn list_files(
     let bucket = params.bucket.as_deref();
     let folder_id = params.folder_id.as_deref().and_then(|s| Uuid::parse_str(s).ok());
     let user_files_with_meta =
-        UserFileRepository::list_by_user(state.db.pool(), auth_user.user_id, offset, limit, search, bucket, folder_id).await?;
+        UserFileRepository::list_by_user(state.db.pool(), auth_user.user_id, offset, limit, search, bucket, folder_id, auth_user.bot.as_ref()).await?;
     let total =
-        UserFileRepository::count_by_user(state.db.pool(), auth_user.user_id, search, bucket, folder_id).await?;
+        UserFileRepository::count_by_user(state.db.pool(), auth_user.user_id, search, bucket, folder_id, auth_user.bot.as_ref()).await?;
 
     let files: Vec<FileDto> = user_files_with_meta
         .into_iter()
@@ -579,10 +678,13 @@ pub async fn get_file(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<FileDto>> {
     auth_user.require_scope("files:read")?;
+    auth_user.require_bot_capability(BotCapability::List)?;
     // id here is the user_file id
     let user_file = UserFileRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, id)
         .await?
         .ok_or_else(|| AppError::NotFound("file not found".into()))?;
+
+    require_bot_file_access(&state, &auth_user, &user_file).await?;
 
     let file = FileRepository::find_by_id(state.db.pool(), user_file.file_id)
         .await?
@@ -603,10 +705,13 @@ async fn serve_file(
     disposition: &'static str,
 ) -> Result<Response<Body>, AppError> {
     auth_user.require_scope("files:read")?;
+    auth_user.require_bot_capability(BotCapability::Download)?;
     // id is the user_file id
     let user_file = UserFileRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, id)
         .await?
         .ok_or_else(|| AppError::NotFound("file not found".into()))?;
+
+    require_bot_file_access(&state, &auth_user, &user_file).await?;
 
     // Check can_download permission for the bucket this file belongs to.
     // Files without a bucket are the user's private files and always allowed.
@@ -734,10 +839,13 @@ pub async fn delete_file(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<MessageResponse>> {
     auth_user.require_scope("files:delete")?;
+    auth_user.require_bot_capability(BotCapability::Delete)?;
     // id is the user_file id
     let user_file = UserFileRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, id)
         .await?
         .ok_or_else(|| AppError::NotFound("file not found".into()))?;
+
+    require_bot_file_access(&state, &auth_user, &user_file).await?;
 
     // Check can_upload permission for the bucket (delete requires write access)
     if let Some(ref bucket_name) = user_file.bucket_name {
@@ -766,10 +874,13 @@ pub async fn verify_file(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<serde_json::Value>> {
     auth_user.require_scope("files:read")?;
+    auth_user.require_bot_capability(BotCapability::Download)?;
     // id is the user_file id
     let user_file = UserFileRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, id)
         .await?
         .ok_or_else(|| AppError::NotFound("file not found".into()))?;
+
+    require_bot_file_access(&state, &auth_user, &user_file).await?;
 
     // Verifying reads the stored content, so it requires download permission
     // for the file's bucket (same gate as download_file).
@@ -824,11 +935,22 @@ pub async fn list_user_buckets(
     auth_user: AuthUser,
 ) -> AppResult<Json<Vec<UserBucketDto>>> {
     auth_user.require_scope("files:read")?;
+    auth_user.require_bot_capability(BotCapability::List)?;
     let buckets = BucketRepository::list_accessible_to_user(
         state.db.pool(),
         &auth_user.user_id.to_string(),
     )
     .await?;
+
+    // A bot only sees the buckets its rules allow it to operate in (a bucket
+    // with no rules is always allowed).
+    let buckets = match &auth_user.bot {
+        Some(bot) => buckets
+            .into_iter()
+            .filter(|b| bot.bucket_allowed(&b.name))
+            .collect(),
+        None => buckets,
+    };
 
     let dtos: Vec<UserBucketDto> = buckets
         .into_iter()
@@ -854,6 +976,7 @@ pub async fn rename_file(
     Json(body): Json<RenameFileRequest>,
 ) -> AppResult<Json<MessageResponse>> {
     auth_user.require_scope("files:write")?;
+    auth_user.require_bot_capability(BotCapability::Edit)?;
     let name = body.name.trim().to_string();
     validate_component_name(&name)
         .map_err(|e| AppError::BadRequest(format!("invalid file name: {e}")))?;
@@ -861,6 +984,8 @@ pub async fn rename_file(
     let user_file = UserFileRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, id)
         .await?
         .ok_or_else(|| AppError::NotFound("file not found".into()))?;
+
+    require_bot_file_access(&state, &auth_user, &user_file).await?;
 
     // Renaming is a write operation on the file's bucket.
     if let Some(ref bucket_name) = user_file.bucket_name {
@@ -909,9 +1034,12 @@ pub async fn move_file(
     Json(body): Json<MoveFileRequest>,
 ) -> AppResult<Json<MessageResponse>> {
     auth_user.require_scope("files:write")?;
+    auth_user.require_bot_capability(BotCapability::Edit)?;
     let user_file = UserFileRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, id)
         .await?
         .ok_or_else(|| AppError::NotFound("file not found".into()))?;
+
+    require_bot_file_access(&state, &auth_user, &user_file).await?;
 
     let mut target_bucket = body.bucket_name.clone().or(user_file.bucket_name.clone());
 
@@ -927,6 +1055,8 @@ pub async fn move_file(
         .await?
         .ok_or_else(|| AppError::NotFound("target folder not found".into()))?;
 
+        require_bot_folder_access_ancestors(&state, &auth_user, &target_folder).await?;
+
         match &target_bucket {
             Some(b) if b != &target_folder.bucket_name => {
                 return Err(AppError::BadRequest(
@@ -941,6 +1071,7 @@ pub async fn move_file(
     // Cross-bucket moves require upload permission on the target bucket.
     if target_bucket != user_file.bucket_name {
         if let Some(ref tb) = target_bucket {
+            auth_user.require_bot_bucket(tb)?;
             let accessible = accessible_buckets(&state, auth_user.user_id).await?;
             if !can_upload_on(&accessible, tb) {
                 return Err(AppError::Forbidden(format!(
@@ -1008,9 +1139,12 @@ pub async fn copy_file(
     Json(body): Json<CopyFileRequest>,
 ) -> AppResult<Json<MessageResponse>> {
     auth_user.require_scope("files:write")?;
+    auth_user.require_bot_capability(BotCapability::Copy)?;
     let user_file = UserFileRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, id)
         .await?
         .ok_or_else(|| AppError::NotFound("file not found".into()))?;
+
+    require_bot_file_access(&state, &auth_user, &user_file).await?;
 
     // Resolve the effective target bucket: an explicit bucket must match the
     // folder's bucket, and a missing bucket adopts the folder's bucket.
@@ -1024,6 +1158,8 @@ pub async fn copy_file(
         .await?
         .ok_or_else(|| AppError::NotFound("target folder not found".into()))?;
 
+        require_bot_folder_access_ancestors(&state, &auth_user, &target_folder).await?;
+
         match &target_bucket {
             Some(b) if b != &target_folder.bucket_name => {
                 return Err(AppError::BadRequest(
@@ -1036,6 +1172,8 @@ pub async fn copy_file(
     }
     let target_bucket =
         target_bucket.unwrap_or_else(|| user_file.bucket_name.clone().unwrap_or_default());
+
+    auth_user.require_bot_bucket(&target_bucket)?;
 
     let accessible = accessible_buckets(&state, auth_user.user_id).await?;
 
@@ -1130,6 +1268,7 @@ pub async fn batch_move(
     Json(body): Json<BatchMoveRequest>,
 ) -> AppResult<Json<BatchResultResponse>> {
     auth_user.require_scope("files:write")?;
+    auth_user.require_bot_capability(BotCapability::Edit)?;
     if body.file_ids.is_empty() {
         return Err(AppError::BadRequest("file_ids cannot be empty".into()));
     }
@@ -1152,6 +1291,8 @@ pub async fn batch_move(
         .await?
         .ok_or_else(|| AppError::NotFound("target folder not found".into()))?;
 
+        require_bot_folder_access_ancestors(&state, &auth_user, &target_folder).await?;
+
         if let Some(ref b) = body.bucket_name {
             if b != &target_folder.bucket_name {
                 return Err(AppError::BadRequest(
@@ -1171,6 +1312,12 @@ pub async fn batch_move(
     for file_id in &body.file_ids {
         match UserFileRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, *file_id).await {
             Ok(Some(uf)) => {
+                // A bot may only move files it is allowed to access.
+                if require_bot_file_access(&state, &auth_user, &uf).await.is_err() {
+                    failed += 1;
+                    errors.push(format!("{}: no permission", uf.original_name));
+                    continue;
+                }
                 // Effective target bucket: explicit bucket, else the folder's
                 // bucket, else the file's current bucket.
                 let bucket = body
@@ -1216,6 +1363,7 @@ pub async fn batch_copy(
     Json(body): Json<BatchCopyRequest>,
 ) -> AppResult<Json<BatchResultResponse>> {
     auth_user.require_scope("files:write")?;
+    auth_user.require_bot_capability(BotCapability::Copy)?;
     if body.file_ids.is_empty() {
         return Err(AppError::BadRequest("file_ids cannot be empty".into()));
     }
@@ -1237,6 +1385,8 @@ pub async fn batch_copy(
         .await?
         .ok_or_else(|| AppError::NotFound("target folder not found".into()))?;
 
+        require_bot_folder_access_ancestors(&state, &auth_user, &target_folder).await?;
+
         if let Some(ref b) = body.bucket_name {
             if b != &target_folder.bucket_name {
                 return Err(AppError::BadRequest(
@@ -1256,6 +1406,12 @@ pub async fn batch_copy(
     for file_id in &body.file_ids {
         match UserFileRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, *file_id).await {
             Ok(Some(uf)) => {
+                // A bot may only copy files it is allowed to access.
+                if require_bot_file_access(&state, &auth_user, &uf).await.is_err() {
+                    failed += 1;
+                    errors.push(format!("{}: no permission", uf.original_name));
+                    continue;
+                }
                 // Effective target bucket: explicit bucket, else the folder's
                 // bucket, else the file's current bucket.
                 let bucket = body
@@ -1391,6 +1547,7 @@ pub async fn batch_delete(
     Json(body): Json<BatchDeleteRequest>,
 ) -> AppResult<Json<BatchResultResponse>> {
     auth_user.require_scope("files:delete")?;
+    auth_user.require_bot_capability(BotCapability::Delete)?;
     if body.file_ids.is_empty() {
         return Err(AppError::BadRequest("file_ids cannot be empty".into()));
     }
@@ -1409,6 +1566,12 @@ pub async fn batch_delete(
     for file_id in &body.file_ids {
         match UserFileRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, *file_id).await {
             Ok(Some(uf)) => {
+                // A bot may only delete files it is allowed to access.
+                if require_bot_file_access(&state, &auth_user, &uf).await.is_err() {
+                    failed += 1;
+                    errors.push(format!("{}: no permission", uf.original_name));
+                    continue;
+                }
                 // Check can_upload permission for the bucket
                 let can_delete = if let Some(ref bn) = uf.bucket_name {
                     can_upload_on(&accessible, bn)
@@ -1444,9 +1607,12 @@ pub async fn create_folder(
     Json(body): Json<CreateFolderRequest>,
 ) -> AppResult<Json<FolderDto>> {
     auth_user.require_scope("files:write")?;
+    auth_user.require_bot_capability(BotCapability::Upload)?;
     let name = body.name.trim().to_string();
     validate_component_name(&name)
         .map_err(|e| AppError::BadRequest(format!("invalid folder name: {e}")))?;
+
+    auth_user.require_bot_bucket(&body.bucket_name)?;
 
     // Verify bucket access (folder creation is a write operation)
     let accessible = accessible_buckets(&state, auth_user.user_id).await?;
@@ -1471,6 +1637,11 @@ pub async fn create_folder(
             .await?
             .ok_or_else(|| AppError::NotFound("parent folder not found".into()))?;
 
+            // A bot must be able to reach the immediate parent (ancestor-aware).
+            if depth == 1 {
+                require_bot_folder_access_ancestors(&state, &auth_user, &parent).await?;
+            }
+
             if parent.bucket_name != body.bucket_name {
                 return Err(AppError::BadRequest(
                     "parent folder is in a different bucket".into(),
@@ -1489,6 +1660,14 @@ pub async fn create_folder(
                 }
                 None => break,
             }
+        }
+    } else if let Some(bot) = &auth_user.bot {
+        // Root-level folder creation must be allowed by the bot's rules.
+        if !bot.path_allowed(&body.bucket_name, "") {
+            return Err(AppError::Forbidden(format!(
+                "bot '{}' cannot create folders in the root of bucket '{}'",
+                bot.name, body.bucket_name
+            )));
         }
     }
 
@@ -1521,8 +1700,10 @@ pub async fn list_folder_contents(
     Query(params): Query<ListFilesParams>,
 ) -> AppResult<Json<FolderContentDto>> {
     auth_user.require_scope("files:read")?;
+    auth_user.require_bot_capability(BotCapability::List)?;
     let bucket = params.bucket.as_ref()
         .ok_or_else(|| AppError::BadRequest("bucket parameter is required".into()))?;
+    auth_user.require_bot_bucket(bucket)?;
 
     let folder_id = params.folder_id.as_deref().and_then(|s| Uuid::parse_str(s).ok());
 
@@ -1541,6 +1722,19 @@ pub async fn list_folder_contents(
             return Err(AppError::BadRequest(
                 "folder is in a different bucket than requested".into(),
             ));
+        }
+        // A bot must be able to reach the folder it is listing.
+        require_bot_folder_access_ancestors(&state, &auth_user, &folder).await?;
+    } else {
+        // A bot can only list the root when its rules cover the root path
+        // (no rules, or an empty-path allow rule).
+        if let Some(bot) = &auth_user.bot {
+            if !bot.path_allowed(bucket, "") {
+                return Err(AppError::Forbidden(format!(
+                    "bot '{}' cannot list the root of bucket '{}'",
+                    bot.name, bucket
+                )));
+            }
         }
     }
 
@@ -1597,8 +1791,10 @@ pub async fn list_all_folders(
     Query(params): Query<ListFilesParams>,
 ) -> AppResult<Json<FolderTreeDto>> {
     auth_user.require_scope("files:read")?;
+    auth_user.require_bot_capability(BotCapability::List)?;
     let bucket = params.bucket.as_ref()
         .ok_or_else(|| AppError::BadRequest("bucket parameter is required".into()))?;
+    auth_user.require_bot_bucket(bucket)?;
 
     let folders = FolderRepository::list_all_for_bucket(
         state.db.pool(),
@@ -1607,11 +1803,18 @@ pub async fn list_all_folders(
     )
     .await?;
 
-    let items: Vec<FolderTreeItem> = folders.into_iter().map(|f| FolderTreeItem {
-        id: f.id,
-        name: f.name,
-        parent_id: f.parent_id,
-    }).collect();
+    // Bots only see folders they can reach (the folder itself or one of its
+    // ancestors is on their allow-list).
+    let mut items: Vec<FolderTreeItem> = Vec::new();
+    for f in folders {
+        if require_bot_folder_access_ancestors(&state, &auth_user, &f).await.is_ok() {
+            items.push(FolderTreeItem {
+                id: f.id,
+                name: f.name,
+                parent_id: f.parent_id,
+            });
+        }
+    }
 
     Ok(Json(FolderTreeDto { folders: items }))
 }
@@ -1670,6 +1873,18 @@ pub async fn resolve_folder_path(
 
     match result {
         Some((folder_id, path_chain)) => {
+            // A bot must be able to reach the resolved folder.
+            if auth_user.bot.is_some() {
+                let folder = FolderRepository::find_by_user_and_id(
+                    state.db.pool(),
+                    auth_user.user_id,
+                    folder_id,
+                )
+                .await?
+                .ok_or_else(|| AppError::NotFound("folder not found".into()))?;
+                require_bot_folder_access_ancestors(&state, &auth_user, &folder).await?;
+            }
+
             let breadcrumbs: Vec<FolderBreadcrumb> = path_chain
                 .into_iter()
                 .map(|(id, name)| FolderBreadcrumb {
@@ -1695,6 +1910,7 @@ pub async fn rename_folder(
     Json(body): Json<RenameFolderRequest>,
 ) -> AppResult<Json<MessageResponse>> {
     auth_user.require_scope("files:write")?;
+    auth_user.require_bot_capability(BotCapability::Edit)?;
     let name = body.name.trim().to_string();
     validate_component_name(&name)
         .map_err(|e| AppError::BadRequest(format!("invalid folder name: {e}")))?;
@@ -1702,6 +1918,7 @@ pub async fn rename_folder(
     let folder = FolderRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, id)
         .await?
         .ok_or_else(|| AppError::NotFound("folder not found".into()))?;
+    require_bot_folder_access_ancestors(&state, &auth_user, &folder).await?;
 
     FolderRepository::update_name(state.db.pool(), folder.id, &name).await?;
 
@@ -1717,9 +1934,11 @@ pub async fn delete_folder(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<MessageResponse>> {
     auth_user.require_scope("files:delete")?;
+    auth_user.require_bot_capability(BotCapability::Upload)?;
     let folder = FolderRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, id)
         .await?
         .ok_or_else(|| AppError::NotFound("folder not found".into()))?;
+    require_bot_folder_access_ancestors(&state, &auth_user, &folder).await?;
 
     // Deleting a folder soft-deletes every file in it, so it requires write
     // access to the folder's bucket (matches delete_file semantics).
@@ -1746,9 +1965,12 @@ pub async fn move_folder(
     Json(body): Json<MoveFolderRequest>,
 ) -> AppResult<Json<MessageResponse>> {
     auth_user.require_scope("files:write")?;
+    auth_user.require_bot_capability(BotCapability::Edit)?;
     let folder = FolderRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, id)
         .await?
         .ok_or_else(|| AppError::NotFound("folder not found".into()))?;
+    require_bot_folder_access_ancestors(&state, &auth_user, &folder).await?;
+    auth_user.require_bot_bucket(&folder.bucket_name)?;
 
     // The target folder must belong to the same user and the same bucket, so
     // folders can never end up nested across buckets.
@@ -1760,6 +1982,7 @@ pub async fn move_folder(
         )
         .await?
         .ok_or_else(|| AppError::NotFound("target folder not found".into()))?;
+        require_bot_folder_access_ancestors(&state, &auth_user, &target).await?;
 
         if target.bucket_name != folder.bucket_name {
             return Err(AppError::BadRequest(

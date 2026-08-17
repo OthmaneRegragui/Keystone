@@ -1,8 +1,41 @@
 use std::sync::Arc;
 use axum::Router;
 use crate::AppState;
+use axum::middleware::from_fn;
+use crate::api::middleware::{bot_only, reject_bots};
 
 pub fn api_routes() -> Router<Arc<AppState>> {
+    // Bot-only API namespace. Bots authenticate with a bot API key and are
+    // restricted to buckets plus file/folder operations (upload, download,
+    // edit, create, move, copy, delete, list). The handlers here are the same
+    // ones used by the user-facing API — they already enforce the bot's
+    // capability flags and bucket/file/folder allow-lists — but this namespace
+    // is gated so only bot API keys can reach it.
+    let bot_routes = axum::Router::new()
+        .route("/buckets", axum::routing::get(crate::api::controllers::files::list_user_buckets))
+        .nest("/files", axum::Router::new()
+            .route("/", axum::routing::post(crate::api::controllers::files::upload).get(crate::api::controllers::files::list_files))
+            .route("/batch-move", axum::routing::post(crate::api::controllers::files::batch_move))
+            .route("/batch-copy", axum::routing::post(crate::api::controllers::files::batch_copy))
+            .route("/batch-delete", axum::routing::post(crate::api::controllers::files::batch_delete))
+            .route("/:id", axum::routing::get(crate::api::controllers::files::get_file).delete(crate::api::controllers::files::delete_file))
+            .route("/:id/download", axum::routing::get(crate::api::controllers::files::download_file))
+            .route("/:id/raw", axum::routing::get(crate::api::controllers::files::raw_file))
+            .route("/:id/verify", axum::routing::get(crate::api::controllers::files::verify_file))
+            .route("/:id/rename", axum::routing::post(crate::api::controllers::files::rename_file))
+            .route("/:id/move", axum::routing::post(crate::api::controllers::files::move_file))
+            .route("/:id/copy", axum::routing::post(crate::api::controllers::files::copy_file)),
+        )
+        .nest("/folders", axum::Router::new()
+            .route("/", axum::routing::get(crate::api::controllers::files::list_folder_contents).post(crate::api::controllers::files::create_folder))
+            .route("/all", axum::routing::get(crate::api::controllers::files::list_all_folders))
+            .route("/resolve", axum::routing::get(crate::api::controllers::files::resolve_folder_path))
+            .route("/:id/rename", axum::routing::post(crate::api::controllers::files::rename_folder))
+            .route("/:id/move", axum::routing::post(crate::api::controllers::files::move_folder))
+            .route("/:id", axum::routing::delete(crate::api::controllers::files::delete_folder)),
+        )
+        .layer(from_fn(bot_only));
+
     Router::new()
         .nest(
             "/auth",
@@ -15,11 +48,14 @@ pub fn api_routes() -> Router<Arc<AppState>> {
                 .route("/reset-password", axum::routing::post(crate::api::controllers::auth::reset_password))
                 .route("/change-password", axum::routing::post(crate::api::controllers::auth::change_password)),
         )
+        .nest("/api/bot", bot_routes)
         .nest(
             "/api",
             axum::Router::new()
                 .route("/public/settings", axum::routing::get(crate::api::controllers::health::public_settings))
                 .route("/me/permissions", axum::routing::get(crate::api::controllers::auth::account_permissions))
+                .route("/api-keys", axum::routing::get(crate::api::controllers::account::list_my_api_keys).post(crate::api::controllers::account::create_user_api_key))
+                .route("/api-keys/:id", axum::routing::delete(crate::api::controllers::account::delete_user_api_key))
                 .route("/dashboard/stats", axum::routing::get(crate::api::controllers::dashboard::stats))
                 .route("/buckets", axum::routing::get(crate::api::controllers::files::list_user_buckets))
                 .nest("/files", axum::Router::new()
@@ -43,17 +79,14 @@ pub fn api_routes() -> Router<Arc<AppState>> {
                     .route("/:id/move", axum::routing::post(crate::api::controllers::files::move_folder))
                     .route("/:id", axum::routing::delete(crate::api::controllers::files::delete_folder)),
                 )
-                .nest("/api-keys", axum::Router::new()
-                    .route("/", axum::routing::post(crate::api::controllers::api_keys::create_api_key).get(crate::api::controllers::api_keys::list_api_keys))
-                    .route("/revoke", axum::routing::post(crate::api::controllers::api_keys::revoke_api_key))
-                    .route("/regenerate", axum::routing::post(crate::api::controllers::api_keys::regenerate_api_key)),
-                )
                 .nest("/health", axum::Router::new()
                     .route("/", axum::routing::get(crate::api::controllers::health::health))
                     .route("/ready", axum::routing::get(crate::api::controllers::health::ready)),
                 )
                 .nest("/admin", axum::Router::new()
                     .route("/stats", axum::routing::get(crate::api::controllers::admin::get_stats))
+                    .route("/orphaned-files", axum::routing::get(crate::api::controllers::admin::list_orphaned_files).delete(crate::api::controllers::admin::delete_all_orphaned_files))
+                    .route("/orphaned-files/:id", axum::routing::delete(crate::api::controllers::admin::delete_orphaned_file))
                     .route("/settings", axum::routing::get(crate::api::controllers::admin::get_settings))
                     .route("/settings", axum::routing::put(crate::api::controllers::admin::update_setting))
                     .route("/backends", axum::routing::get(crate::api::controllers::admin::list_storage_backends))
@@ -92,7 +125,11 @@ pub fn api_routes() -> Router<Arc<AppState>> {
                     .route("/buckets/:name/import-combined", axum::routing::post(crate::api::controllers::admin::import_bucket_combined))
                     .route("/api-keys", axum::routing::get(crate::api::controllers::admin::list_all_api_keys))
                     .route("/api-keys", axum::routing::post(crate::api::controllers::admin::create_admin_api_key))
-                    .route("/api-keys/revoke", axum::routing::delete(crate::api::controllers::admin::revoke_api_key)),
-                ),
+                    .route("/api-keys/revoke", axum::routing::delete(crate::api::controllers::admin::revoke_api_key))
+                    .route("/bots", axum::routing::get(crate::api::controllers::admin::bots::list_bots))
+                    .route("/bots", axum::routing::post(crate::api::controllers::admin::bots::create_bot))
+                    .route("/bots/:id", axum::routing::put(crate::api::controllers::admin::bots::update_bot).delete(crate::api::controllers::admin::bots::delete_bot)),
+                )
+                .layer(from_fn(reject_bots)),
         )
 }

@@ -150,6 +150,7 @@ pub async fn get_group_detail(
         buckets,
         allow_api_keys: group.allow_api_keys,
         allow_password_change: group.allow_password_change,
+        allow_bots: group.allow_bots,
     }))
 }
 
@@ -297,10 +298,11 @@ pub async fn update_group_permissions(
         &body.group_id,
         body.allow_api_keys,
         body.allow_password_change,
+        body.allow_bots,
     ).await?;
     info!(
-        "admin {} updated group {} permissions: allow_api_keys={}, allow_password_change={}",
-        auth.username, body.group_id, body.allow_api_keys, body.allow_password_change
+        "admin {} updated group {} permissions: allow_api_keys={}, allow_password_change={}, allow_bots={}",
+        auth.username, body.group_id, body.allow_api_keys, body.allow_password_change, body.allow_bots
     );
     Ok(Json(MessageResponse { message: "group permissions updated".to_string() }))
 }

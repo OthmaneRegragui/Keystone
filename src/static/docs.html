@@ -26,49 +26,39 @@
         html.dark .border-gray-200, html.dark .border-gray-300 { border-color: #2c2c33 !important; }
         html.dark code { background-color: #2b2b3d !important; color: #a5b4fc !important; }
         html.dark pre { background-color: #16161a !important; color: #c2c2c8 !important; }
-        code { background-color: #fef3c7; color: #b45309; border-radius: 0.25rem; padding: 0.1rem 0.35rem; font-size: 0.85em; }
+        code { background-color: #e0e7ff; color: #4338ca; border-radius: 0.25rem; padding: 0.1rem 0.35rem; font-size: 0.85em; }
         pre { background-color: #0f172a; color: #e2e8f0; border-radius: 0.5rem; padding: 1rem; overflow-x: auto; font-size: 0.8rem; line-height: 1.5; }
         pre code { background: transparent; color: inherit; padding: 0; }
         .doc-anchor { scroll-margin-top: 5.5rem; }
-        /* Summer: scroll container smooth-jumps to section anchors */
         main { scroll-behavior: smooth; }
-
-        /* Summer page background (light) — warm sunrise gradient */
-        body.summer-bg {
-            background: linear-gradient(180deg, #fffbeb 0%, #fff7ed 45%, #fef3c7 100%);
-        }
-        html.dark body.summer-bg {
-            background: #131316 !important;
-        }
 
         /* Sticky section nav — translucent so content shows through, blurred */
         .docs-nav {
-            background-color: rgba(255, 251, 235, 0.92);
+            background-color: #ffffff;
             backdrop-filter: blur(8px);
             -webkit-backdrop-filter: blur(8px);
         }
         html.dark .docs-nav {
-            background-color: rgba(19, 19, 22, 0.92) !important;
+            background-color: #131316 !important;
         }
-
-        /* Sunny banner at the top of the docs */
+        /* Banner at the top of the docs */
         .docs-banner {
-            background: linear-gradient(90deg, #fef3c7, #fefce8 45%, #ffedd5);
-            border-color: #fde68a;
+            background: linear-gradient(90deg, #eef2ff, #ffffff 45%, #eef2ff);
+            border-color: #c7d2fe;
         }
         html.dark .docs-banner {
-            background: linear-gradient(90deg, #2b2b3d, #1a1a1f 45%, #2b2416) !important;
-            border-color: #3a3a42 !important;
+            background: linear-gradient(90deg, #232331, #1a1a1f 45%, #232331) !important;
+            border-color: #3c3c55 !important;
         }
 
-        /* Dark-mode overrides for the summer amber/orange accents */
-        html.dark .bg-amber-100 { background-color: #2b2b3d !important; }
-        html.dark .text-amber-600, html.dark .text-amber-500 { color: #fbbf24 !important; }
-        html.dark .text-amber-700 { color: #fcd34d !important; }
-        html.dark .text-amber-800 { color: #fde68a !important; }
-        html.dark .text-amber-900 { color: #fef3c7 !important; }
-        html.dark .border-amber-200 { border-color: #2c2c33 !important; }
-        html.dark .border-amber-500 { border-color: #f59e0b !important; }
+        /* Dark-mode overrides for the indigo accents */
+        html.dark .bg-indigo-100 { background-color: #35354a !important; }
+        html.dark .text-indigo-600, html.dark .text-indigo-500 { color: #a5b4fc !important; }
+        html.dark .text-indigo-700 { color: #93a0f7 !important; }
+        html.dark .text-indigo-800 { color: #b1c0ff !important; }
+        html.dark .text-indigo-900 { color: #c7d2fe !important; }
+        html.dark .border-indigo-200 { border-color: #3c3c55 !important; }
+        html.dark .border-indigo-500 { border-color: #818cf8 !important; }
 
         /* Section headings get a little sun-bar accent */
         .doc-anchor h3 {
@@ -88,7 +78,7 @@
         }
     </style>
 </head>
-<body class="h-full bg-gray-50 summer-bg">
+<body class="h-full bg-gray-50">
     <script>
         (function() {
             function redirectLogin() { try { window.location.replace('/login'); } catch (e) {} }
@@ -129,26 +119,30 @@
                 </h1>
             </div>
             <nav class="flex-1 p-4 space-y-1">
-                <a href="/" x-on:click="closeSidebar()" :class="active('/') ? 'bg-amber-100 text-amber-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                <a href="/" x-on:click="closeSidebar()" :class="active('/') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
                     <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
                     Dashboard
                 </a>
-                <a href="/files" x-on:click="closeSidebar()" :class="active('/files') ? 'bg-amber-100 text-amber-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                <a href="/files" x-on:click="closeSidebar()" :class="active('/files') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
                     <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
                     Files
                 </a>
-                <a href="/account" x-on:click="closeSidebar()" :class="active('/account') ? 'bg-amber-100 text-amber-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                <a href="/account" x-on:click="closeSidebar()" :class="active('/account') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
                     <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
                     Account
                 </a>
+                <a href="/bots" x-on:click="closeSidebar()" :class="active('/bots') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9z"/></svg>
+                    Bots
+                </a>
                 <template x-if="user && user.role === 'admin'">
-                    <a href="/admin?page=overview" x-on:click="closeSidebar()" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-gray-50">
+                    <a href="/admin?page=overview" x-on:click="closeSidebar()" :class="active('/admin') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
                         <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
                         Admin
                     </a>
                 </template>
                 <template x-if="user && user.role === 'admin'">
-                    <a href="/docs" x-on:click="closeSidebar()" :class="active('/docs') ? 'bg-amber-100 text-amber-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                    <a href="/docs" x-on:click="closeSidebar()" :class="active('/docs') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
                         <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
                         Documentation
                     </a>
@@ -156,7 +150,7 @@
             </nav>
             <div class="p-4 border-t border-gray-200 space-y-3">
                 <div class="flex items-center gap-3">
-                    <div class="w-8 h-8 bg-amber-100 rounded-full flex items-center justify-center text-amber-700 font-medium text-sm" x-text="userInitial"></div>
+                    <div class="w-8 h-8 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-700 font-medium text-sm" x-text="userInitial"></div>
                     <div class="flex-1 min-w-0">
                         <p class="text-sm font-medium text-gray-900 truncate" x-text="userName"></p>
                         <p class="text-xs text-gray-400 truncate" x-text="userEmail"></p>
@@ -169,7 +163,7 @@
                         <span x-text="themeDark ? 'Dark mode' : 'Light mode'"></span>
                     </span>
                     <button x-on:click="toggleTheme()" role="switch" :aria-checked="themeDark"
-                        :class="themeDark ? 'bg-amber-500' : 'bg-gray-300'"
+                        :class="themeDark ? 'bg-indigo-500' : 'bg-gray-300'"
                         class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none">
                         <span :class="themeDark ? 'translate-x-4' : 'translate-x-0'"
                             class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
@@ -196,43 +190,46 @@
                     <img src="/logo.svg" alt="Keystone logo" class="w-16 h-16 mx-auto mb-4 opacity-40">
                     <h2 class="text-xl font-bold text-gray-900 mb-2">Restricted</h2>
                     <p class="text-sm text-gray-500 mb-6">Documentation is available to administrators only.</p>
-                    <a href="/files" class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500 text-white text-sm font-medium hover:bg-amber-600">Back to Files</a>
+                    <a href="/files" class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700">Back to Files</a>
                 </div>
             </div>
 
             <!-- Docs content -->
             <div x-show="isAdmin" class="p-4 sm:p-8 max-w-4xl">
                 <div class="docs-banner border rounded-2xl px-5 py-4 flex items-center gap-4 mb-8">
-                    <div class="w-12 h-12 rounded-full bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center shrink-0 shadow-md">
+                    <div class="w-12 h-12 rounded-full bg-gradient-to-br from-indigo-500 to-indigo-600 flex items-center justify-center shrink-0 shadow-md">
                         <svg class="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
                     </div>
                     <div class="min-w-0">
-                        <h2 class="text-xl sm:text-2xl font-bold text-amber-900 mb-0.5">Documentation</h2>
-                        <p class="text-xs sm:text-sm text-amber-800">Operational reference for Keystone administrators. The tabs below follow you as you scroll — the active section stays highlighted, and the URL hash updates so you can bookmark any spot.</p>
+                        <h2 class="text-xl sm:text-2xl font-bold text-gray-900 mb-0.5">Documentation</h2>
+                        <p class="text-xs sm:text-sm text-gray-600">Operational reference for Keystone administrators. The tabs below follow you as you scroll — the active section stays highlighted, and the URL hash updates so you can bookmark any spot.</p>
                     </div>
                 </div>
 
-                <nav class="docs-nav sticky top-0 z-20 -mx-4 sm:-mx-8 px-4 sm:px-8 flex gap-1 border-b border-amber-200 flex-wrap text-sm">
+                <nav class="docs-nav sticky top-0 z-20 -mx-4 sm:-mx-8 px-4 sm:px-8 flex gap-1 border-b border-gray-200 flex-wrap text-sm">
                     <a href="#overview" x-on:click="activeSection = 'overview'"
-                        :class="activeSection === 'overview' ? 'text-amber-700 font-medium border-amber-500' : 'text-gray-500 hover:text-amber-600 border-transparent hover:border-amber-300'"
+                        :class="activeSection === 'overview' ? 'text-indigo-700 font-medium border-indigo-500' : 'text-gray-500 hover:text-indigo-600 border-transparent hover:border-indigo-300'"
                         class="px-3 py-2 border-b-2 -mb-px transition-colors">Overview</a>
                     <a href="#storage" x-on:click="activeSection = 'storage'"
-                        :class="activeSection === 'storage' ? 'text-amber-700 font-medium border-amber-500' : 'text-gray-500 hover:text-amber-600 border-transparent hover:border-amber-300'"
+                        :class="activeSection === 'storage' ? 'text-indigo-700 font-medium border-indigo-500' : 'text-gray-500 hover:text-indigo-600 border-transparent hover:border-indigo-300'"
                         class="px-3 py-2 border-b-2 -mb-px transition-colors">Storage Layout</a>
                     <a href="#naming" x-on:click="activeSection = 'naming'"
-                        :class="activeSection === 'naming' ? 'text-amber-700 font-medium border-amber-500' : 'text-gray-500 hover:text-amber-600 border-transparent hover:border-amber-300'"
+                        :class="activeSection === 'naming' ? 'text-indigo-700 font-medium border-indigo-500' : 'text-gray-500 hover:text-indigo-600 border-transparent hover:border-indigo-300'"
                         class="px-3 py-2 border-b-2 -mb-px transition-colors">Name Rules</a>
                     <a href="#deep-links" x-on:click="activeSection = 'deep-links'"
-                        :class="activeSection === 'deep-links' ? 'text-amber-700 font-medium border-amber-500' : 'text-gray-500 hover:text-amber-600 border-transparent hover:border-amber-300'"
+                        :class="activeSection === 'deep-links' ? 'text-indigo-700 font-medium border-indigo-500' : 'text-gray-500 hover:text-indigo-600 border-transparent hover:border-indigo-300'"
                         class="px-3 py-2 border-b-2 -mb-px transition-colors">Deep Links</a>
                     <a href="#operations" x-on:click="activeSection = 'operations'"
-                        :class="activeSection === 'operations' ? 'text-amber-700 font-medium border-amber-500' : 'text-gray-500 hover:text-amber-600 border-transparent hover:border-amber-300'"
+                        :class="activeSection === 'operations' ? 'text-indigo-700 font-medium border-indigo-500' : 'text-gray-500 hover:text-indigo-600 border-transparent hover:border-indigo-300'"
                         class="px-3 py-2 border-b-2 -mb-px transition-colors">Operations</a>
                     <a href="#api" x-on:click="activeSection = 'api'"
-                        :class="activeSection === 'api' ? 'text-amber-700 font-medium border-amber-500' : 'text-gray-500 hover:text-amber-600 border-transparent hover:border-amber-300'"
+                        :class="activeSection === 'api' ? 'text-indigo-700 font-medium border-indigo-500' : 'text-gray-500 hover:text-indigo-600 border-transparent hover:border-indigo-300'"
                         class="px-3 py-2 border-b-2 -mb-px transition-colors">API Reference</a>
+                    <a href="#bots" x-on:click="activeSection = 'bots'"
+                        :class="activeSection === 'bots' ? 'text-indigo-700 font-medium border-indigo-500' : 'text-gray-500 hover:text-indigo-600 border-transparent hover:border-indigo-300'"
+                        class="px-3 py-2 border-b-2 -mb-px transition-colors">Bots</a>
                     <a href="#errors" x-on:click="activeSection = 'errors'"
-                        :class="activeSection === 'errors' ? 'text-amber-700 font-medium border-amber-500' : 'text-gray-500 hover:text-amber-600 border-transparent hover:border-amber-300'"
+                        :class="activeSection === 'errors' ? 'text-indigo-700 font-medium border-indigo-500' : 'text-gray-500 hover:text-indigo-600 border-transparent hover:border-indigo-300'"
                         class="px-3 py-2 border-b-2 -mb-px transition-colors">Errors</a>
                 </nav>
 
@@ -384,14 +381,17 @@ docker exec keystone-postgres psql -U keystone -d keystone -c "SELECT version();
                                     </tr>
                                 </thead>
                                 <tbody class="divide-y divide-gray-100">
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-amber-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/register</td><td class="py-2">Create account (disabled when registration is blocked)</td></tr>
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-amber-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/login</td><td class="py-2">Exchange credentials for access + refresh tokens</td></tr>
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-amber-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/refresh</td><td class="py-2">Rotate tokens with a refresh token</td></tr>
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-amber-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/logout</td><td class="py-2">Revoke the session</td></tr>
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-amber-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/forgot-password</td><td class="py-2">Request a password reset token</td></tr>
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-amber-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/reset-password</td><td class="py-2">Complete password reset with the emailed token</td></tr>
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-amber-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/change-password</td><td class="py-2">Change password (authenticated)</td></tr>
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/me/permissions</td><td class="py-2">Your effective allow_api_keys / allow_password_change</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/register</td><td class="py-2">Create account (disabled when registration is blocked)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/login</td><td class="py-2">Exchange credentials for access + refresh tokens</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/refresh</td><td class="py-2">Rotate tokens with a refresh token</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/logout</td><td class="py-2">Revoke the session</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/forgot-password</td><td class="py-2">Request a password reset token</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/reset-password</td><td class="py-2">Complete password reset with the emailed token</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/change-password</td><td class="py-2">Change password (authenticated)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/me/permissions</td><td class="py-2">Your effective allow_api_keys / allow_password_change / allow_bots</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/api-keys</td><td class="py-2">List your own API keys (Account → API Keys)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/api-keys</td><td class="py-2">Create your own API key: <code>{ "name", "scopes", "expires_in_days" }</code> — <code>full_key</code> shown once</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-rose-600">DELETE</td><td class="py-2 pr-4 font-mono text-xs">/api/api-keys/:id</td><td class="py-2">Permanently delete one of your own API keys</td></tr>
                                     <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/buckets</td><td class="py-2">Buckets the caller can access</td></tr>
                                     <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/files</td><td class="py-2">Upload file (multipart)</td></tr>
                                     <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/files?bucket=&amp;folder_id=&amp;page=</td><td class="py-2">List files (paginated)</td></tr>
@@ -413,19 +413,85 @@ docker exec keystone-postgres psql -U keystone -d keystone -c "SELECT version();
                                     <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/folders/:id/rename</td><td class="py-2">Rename folder (name validated)</td></tr>
                                     <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/folders/:id/move</td><td class="py-2">Move folder to a new parent</td></tr>
                                     <tr><td class="py-2 pr-4 font-mono text-xs text-rose-600">DELETE</td><td class="py-2 pr-4 font-mono text-xs">/api/folders/:id</td><td class="py-2">Delete folder</td></tr>
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/api-keys</td><td class="py-2">Create API key</td></tr>
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/api-keys</td><td class="py-2">List own API keys</td></tr>
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/api-keys/revoke</td><td class="py-2">Revoke key</td></tr>
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/api-keys/regenerate</td><td class="py-2">Regenerate key</td></tr>
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/health</td><td class="py-2">Health check (no auth)</td></tr>
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/health/ready</td><td class="py-2">Readiness (DB + storage, no auth)</td></tr>
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/public/settings</td><td class="py-2">Public platform settings (no auth)</td></tr>
+                                     <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/health</td><td class="py-2">Health check (no auth)</td></tr>
+                                     <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/health/ready</td><td class="py-2">Readiness (DB + storage, no auth)</td></tr>
+                                     <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/public/settings</td><td class="py-2">Public platform settings (no auth)</td></tr>
                                 </tbody>
                             </table>
                         </div>
 
                         <p class="mt-4">Quick check that the server is healthy:</p>
 <pre><code>curl -s http://localhost:3000/api/health/ready</code></pre>
+                    </div>
+                </section>
+
+                <!-- Bots -->
+                <section id="bots" class="doc-anchor mb-10">
+                    <h3 class="text-lg font-bold text-gray-900 mb-3">Bots</h3>
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-4 text-sm text-gray-600 leading-relaxed">
+                        <p>Bots are API-key-authenticated automations (CI pipelines, backups, scripts) that act on behalf of their owner. They are created and managed by administrators in the <span class="font-medium text-gray-900">Bots</span> page (admins manage all bots; users with <code>allow_bots</code> manage only their own).</p>
+
+                        <p class="font-medium text-gray-900 mt-4">What a bot can do</p>
+                        <p>A bot is restricted to <span class="font-medium text-gray-900">buckets and file/folder operations only</span>:</p>
+                        <ul class="list-disc pl-5 space-y-1">
+                            <li><span class="font-medium text-gray-900">Buckets</span> — list the buckets the bot may access.</li>
+                            <li><span class="font-medium text-gray-900">Files</span> — upload, download, list, get metadata, rename (edit), move, copy, delete, verify, and raw/preview streaming.</li>
+                            <li><span class="font-medium text-gray-900">Folders</span> — create, list, resolve paths, rename, move, delete.</li>
+                        </ul>
+                        <p>Bots can <em>never</em> access accounts, API keys, dashboard stats, health, settings, or any admin endpoint — those reject bot keys. All other <code>/api/*</code> endpoints likewise reject bot credentials.</p>
+
+                        <p class="font-medium text-gray-900 mt-4">Dedicated endpoints</p>
+                        <p>Bots use their own endpoint namespace, <code>/api/bot/*</code>, which accepts only bot API keys. A normal user or ordinary API key calling these endpoints is rejected, and a bot key calling the regular <code>/api/*</code> endpoints is rejected too — the two surfaces are fully separated.</p>
+
+                        <p>Every bot is additionally scoped by its owner's permissions, its capability flags (<code>upload</code>, <code>download</code>, <code>copy</code>, <code>edit</code>, <code>delete</code>, <code>list</code>), and its <span class="font-medium text-gray-900">path rules</span> — a list of <code>(bucket, path, allow|block)</code> rows. Operations outside those limits fail with <code>403 Forbidden</code>.</p>
+
+                        <p class="font-medium text-gray-900 mt-4">Path rules</p>
+                        <p>Path rules narrow which paths inside a bucket a bot may use. A bucket with no rule at all is fully accessible; an empty path (<code>""</code>) refers to the whole bucket. Rules are evaluated most-restrictive-first: a matching <code>block</code> rule always wins over an <code>allow</code> rule, and a bucket that has any rule is fail-closed — a path is allowed only when an <code>allow</code> rule covers it and no <code>block</code> rule does. A rule on <code>/a</code> also covers everything beneath it (<code>/a/b</code>, <code>/a/b/c.txt</code>), but not a sibling like <code>/ab</code>.</p>
+                        <p class="text-sm text-gray-500">Examples: <code>[{"bucket":"data","path":"","status":"allow"},{"bucket":"data","path":"/secret","status":"block"}]</code> opens bucket <code>data</code> except the <code>/secret</code> subtree. <code>[{"bucket":"data","path":"/reports","status":"allow"}]</code> restricts the bot to the <code>/reports</code> subtree only (the bucket root and everything else are denied).</p>
+
+                        <p class="font-medium text-gray-900 mt-4">Authentication</p>
+                        <p>Present the bot's API key as a bearer token:</p>
+<pre><code>Authorization: Bearer ks_...</code></pre>
+
+                        <div class="overflow-x-auto">
+                            <table class="min-w-full text-left text-sm">
+                                <thead>
+                                    <tr class="border-b border-gray-200 text-gray-500 text-xs uppercase tracking-wide">
+                                        <th class="py-2 pr-4">Method</th>
+                                        <th class="py-2 pr-4">Path</th>
+                                        <th class="py-2">Purpose</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-gray-100">
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/buckets</td><td class="py-2">Buckets the bot can access (honors its path rules)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/files</td><td class="py-2">Upload file (multipart)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/files?bucket=&amp;folder_id=&amp;page=</td><td class="py-2">List files (paginated)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/files/batch-move</td><td class="py-2">Move multiple files at once</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/files/batch-copy</td><td class="py-2">Copy multiple files at once</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/files/batch-delete</td><td class="py-2">Delete multiple files at once</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/files/:id</td><td class="py-2">File metadata</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/files/:id/download</td><td class="py-2">Download bytes (<code>Content-Disposition: attachment</code>)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/files/:id/raw</td><td class="py-2">Raw bytes inline — renders images, videos, PDFs in the browser</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/files/:id/verify</td><td class="py-2">Verify stored bytes match the recorded hash</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/files/:id/rename</td><td class="py-2">Rename file (edit)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/files/:id/move</td><td class="py-2">Move file between folders</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/files/:id/copy</td><td class="py-2">Copy file (content-addressed dedup)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-rose-600">DELETE</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/files/:id</td><td class="py-2">Delete file</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/folders?bucket=&amp;parent_id=</td><td class="py-2">List folder contents (files + folders)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/folders/all</td><td class="py-2">List all folders in a bucket (for building a tree)</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/folders/resolve?bucket_id=&amp;path=</td><td class="py-2">Resolve a path (e.g. <code>/test/hello</code>) to a folder id</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/folders</td><td class="py-2">Create folder</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/folders/:id/rename</td><td class="py-2">Rename folder</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-emerald-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/folders/:id/move</td><td class="py-2">Move folder to a new parent</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-rose-600">DELETE</td><td class="py-2 pr-4 font-mono text-xs">/api/bot/folders/:id</td><td class="py-2">Delete folder</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <p class="font-medium text-gray-900 mt-4">Quick check</p>
+<pre><code># List the buckets the bot can reach
+curl -s http://localhost:3000/api/bot/buckets \
+  -H "Authorization: Bearer ks_..."</code></pre>
                     </div>
                 </section>
 

@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod api_key;
 pub mod audit;
+pub mod bot;
 pub mod file;
 pub mod folder;
 pub mod group;
@@ -12,6 +13,7 @@ pub mod user_file;
 pub use admin::{AdminSetting, Bucket, PlatformSettings};
 pub use api_key::ApiKey;
 pub use audit::AuditLog;
+pub use bot::{Bot, BotPathRule, BotRuleStatus};
 pub use file::File;
 pub use folder::UserFolder;
 pub use group::UserGroup;

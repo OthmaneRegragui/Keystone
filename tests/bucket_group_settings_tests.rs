@@ -30,7 +30,7 @@ async fn create_test_user(pool: &sqlx::PgPool) -> String {
 
 #[tokio::test]
 async fn test_bucket_create() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let name = format!("b_{}", &Uuid::new_v4().to_string()[..8]);
     let bucket = BucketRepository::create(db.pool(), &name, "/data/bucket1")
         .await
@@ -45,7 +45,7 @@ async fn test_bucket_create() {
 
 #[tokio::test]
 async fn test_bucket_create_duplicate() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let name = format!("b_{}", &Uuid::new_v4().to_string()[..8]);
     BucketRepository::create(db.pool(), &name, "/data/a")
         .await
@@ -57,7 +57,7 @@ async fn test_bucket_create_duplicate() {
 
 #[tokio::test]
 async fn test_bucket_list() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let n1 = format!("b_{}", &Uuid::new_v4().to_string()[..8]);
     let n2 = format!("b_{}", &Uuid::new_v4().to_string()[..8]);
     let n3 = format!("b_{}", &Uuid::new_v4().to_string()[..8]);
@@ -84,7 +84,7 @@ async fn test_bucket_list() {
 
 #[tokio::test]
 async fn test_bucket_find_by_name() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let name = format!("b_{}", &Uuid::new_v4().to_string()[..8]);
     BucketRepository::create(db.pool(), &name, "/data/x")
         .await
@@ -102,7 +102,7 @@ async fn test_bucket_find_by_name() {
 
 #[tokio::test]
 async fn test_bucket_set_visible() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let name = format!("b_{}", &Uuid::new_v4().to_string()[..8]);
     BucketRepository::create(db.pool(), &name, "/data/x")
         .await
@@ -121,14 +121,14 @@ async fn test_bucket_set_visible() {
 
 #[tokio::test]
 async fn test_bucket_set_visible_nonexistent() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let result = BucketRepository::set_visible(db.pool(), "no_such", false).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
 }
 
 #[tokio::test]
 async fn test_bucket_update() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let name = format!("b_{}", &Uuid::new_v4().to_string()[..8]);
     BucketRepository::create(db.pool(), &name, "/old")
         .await
@@ -152,7 +152,7 @@ async fn test_bucket_update() {
 
 #[tokio::test]
 async fn test_bucket_update_not_found() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let result =
         BucketRepository::update(db.pool(), "no_such", "new", "/x", true, true, 0).await;
     assert!(matches!(result, Err(AppError::NotFound(_))));
@@ -160,7 +160,7 @@ async fn test_bucket_update_not_found() {
 
 #[tokio::test]
 async fn test_bucket_update_conflict() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let n1 = format!("b_{}", &Uuid::new_v4().to_string()[..8]);
     let n2 = format!("b_{}", &Uuid::new_v4().to_string()[..8]);
     BucketRepository::create(db.pool(), &n1, "/1").await.unwrap();
@@ -173,7 +173,7 @@ async fn test_bucket_update_conflict() {
 
 #[tokio::test]
 async fn test_bucket_delete() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let name = format!("b_{}", &Uuid::new_v4().to_string()[..8]);
     BucketRepository::create(db.pool(), &name, "/data/x")
         .await
@@ -188,14 +188,14 @@ async fn test_bucket_delete() {
 
 #[tokio::test]
 async fn test_bucket_delete_nonexistent() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let result = BucketRepository::delete(db.pool(), "no_such").await;
     assert!(matches!(result, Err(AppError::BadRequest(_))));
 }
 
 #[tokio::test]
 async fn test_bucket_get_storage_used() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let sentinel = format!("no_such_backend_{}", Uuid::new_v4());
     let map = BucketRepository::get_storage_used_per_bucket(db.pool())
         .await
@@ -207,7 +207,7 @@ async fn test_bucket_get_storage_used() {
 
 #[tokio::test]
 async fn test_bucket_list_visible_to_user() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let pool = db.pool();
 
     let user_id = create_test_user(pool).await;
@@ -235,7 +235,7 @@ async fn test_bucket_list_visible_to_user() {
 
 #[tokio::test]
 async fn test_bucket_list_accessible_to_user() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let pool = db.pool();
 
     let user_id = create_test_user(pool).await;
@@ -275,7 +275,7 @@ async fn test_bucket_list_accessible_to_user() {
 
 #[tokio::test]
 async fn test_group_create() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let name = format!("g_{}", &Uuid::new_v4().to_string()[..8]);
     let group = GroupRepository::create(db.pool(), &name).await.unwrap();
 
@@ -285,7 +285,7 @@ async fn test_group_create() {
 
 #[tokio::test]
 async fn test_group_create_duplicate() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let name = format!("g_{}", &Uuid::new_v4().to_string()[..8]);
     GroupRepository::create(db.pool(), &name).await.unwrap();
 
@@ -295,7 +295,7 @@ async fn test_group_create_duplicate() {
 
 #[tokio::test]
 async fn test_group_list() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let n1 = format!("g_{}", &Uuid::new_v4().to_string()[..8]);
     let n2 = format!("g_{}", &Uuid::new_v4().to_string()[..8]);
     let n3 = format!("g_{}", &Uuid::new_v4().to_string()[..8]);
@@ -322,7 +322,7 @@ async fn test_group_list() {
 
 #[tokio::test]
 async fn test_group_delete() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let name = format!("g_{}", &Uuid::new_v4().to_string()[..8]);
     let group = GroupRepository::create(db.pool(), &name).await.unwrap();
 
@@ -338,7 +338,7 @@ async fn test_group_delete() {
 
 #[tokio::test]
 async fn test_group_add_remove_member() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let pool = db.pool();
     let group = GroupRepository::create(pool, &format!("g_{}", &Uuid::new_v4().to_string()[..8]))
         .await
@@ -366,7 +366,7 @@ async fn test_group_add_remove_member() {
 
 #[tokio::test]
 async fn test_group_add_remove_bucket() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let pool = db.pool();
     let group = GroupRepository::create(pool, &format!("g_{}", &Uuid::new_v4().to_string()[..8]))
         .await
@@ -393,7 +393,7 @@ async fn test_group_add_remove_bucket() {
 
 #[tokio::test]
 async fn test_group_list_group_bucket_details() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let pool = db.pool();
     let group = GroupRepository::create(pool, &format!("g_{}", &Uuid::new_v4().to_string()[..8]))
         .await
@@ -422,7 +422,7 @@ async fn test_group_list_group_bucket_details() {
 
 #[tokio::test]
 async fn test_group_update_bucket_permissions() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let pool = db.pool();
     let group = GroupRepository::create(pool, &format!("g_{}", &Uuid::new_v4().to_string()[..8]))
         .await
@@ -446,7 +446,7 @@ async fn test_group_update_bucket_permissions() {
 
 #[tokio::test]
 async fn test_group_update_bucket_permissions_not_found() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let pool = db.pool();
     let group = GroupRepository::create(pool, &format!("g_{}", &Uuid::new_v4().to_string()[..8]))
         .await
@@ -459,7 +459,7 @@ async fn test_group_update_bucket_permissions_not_found() {
 
 #[tokio::test]
 async fn test_group_set_user_storage_limit() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let pool = db.pool();
     let group = GroupRepository::create(pool, &format!("g_{}", &Uuid::new_v4().to_string()[..8]))
         .await
@@ -482,7 +482,7 @@ async fn test_group_set_user_storage_limit() {
 
 #[tokio::test]
 async fn test_group_set_user_storage_limit_not_found() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let pool = db.pool();
     let group = GroupRepository::create(pool, &format!("g_{}", &Uuid::new_v4().to_string()[..8]))
         .await
@@ -495,7 +495,7 @@ async fn test_group_set_user_storage_limit_not_found() {
 
 #[tokio::test]
 async fn test_group_set_user_groups() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let pool = db.pool();
     let user_id = create_test_user(pool).await;
 
@@ -525,7 +525,7 @@ async fn test_group_set_user_groups() {
 
 #[tokio::test]
 async fn test_setting_get_set() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     AdminSettingRepository::set(db.pool(), "test_key", "test_value")
         .await
         .unwrap();
@@ -538,7 +538,7 @@ async fn test_setting_get_set() {
 
 #[tokio::test]
 async fn test_setting_get_unset() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let val = AdminSettingRepository::get(db.pool(), "nonexistent")
         .await
         .unwrap();
@@ -547,7 +547,7 @@ async fn test_setting_get_unset() {
 
 #[tokio::test]
 async fn test_setting_upsert() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     AdminSettingRepository::set(db.pool(), "key", "value1")
         .await
         .unwrap();
@@ -561,7 +561,7 @@ async fn test_setting_upsert() {
 
 #[tokio::test]
 async fn test_setting_list() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     AdminSettingRepository::set(db.pool(), "aaa", "1").await.unwrap();
     AdminSettingRepository::set(db.pool(), "bbb", "2").await.unwrap();
     AdminSettingRepository::set(db.pool(), "ccc", "3").await.unwrap();
@@ -578,7 +578,7 @@ async fn test_setting_list() {
 
 #[tokio::test]
 async fn test_setting_get_bool_true() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     AdminSettingRepository::set_bool(db.pool(), "flag", true)
         .await
         .unwrap();
@@ -588,7 +588,7 @@ async fn test_setting_get_bool_true() {
 
 #[tokio::test]
 async fn test_setting_get_bool_false() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     AdminSettingRepository::set_bool(db.pool(), "flag", false)
         .await
         .unwrap();
@@ -598,7 +598,7 @@ async fn test_setting_get_bool_false() {
 
 #[tokio::test]
 async fn test_setting_get_bool_unset() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let val = AdminSettingRepository::get_bool(db.pool(), "nonexistent")
         .await
         .unwrap();
@@ -607,7 +607,7 @@ async fn test_setting_get_bool_unset() {
 
 #[tokio::test]
 async fn test_setting_get_platform_settings() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let pool = db.pool();
 
     // Migrations seed: block_registrations=true
@@ -639,7 +639,7 @@ async fn test_setting_get_platform_settings() {
 
 #[tokio::test]
 async fn test_group_permission_flags_for_user() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let pool = db.pool();
     let user_id = create_test_user(pool).await;
 
@@ -659,7 +659,7 @@ async fn test_group_permission_flags_for_user() {
         .unwrap());
 
     // No membership at all -> still false.
-    GroupRepository::update_permissions(pool, &g_on.id, true, true)
+    GroupRepository::update_permissions(pool, &g_on.id, true, true, false)
         .await
         .unwrap();
     assert!(!GroupRepository::user_allows_api_keys(pool, &user_id)
@@ -685,7 +685,7 @@ async fn test_group_permission_flags_for_user() {
         .unwrap());
 
     // Turning the permissive group's password flag back off blocks again.
-    GroupRepository::update_permissions(pool, &g_on.id, true, false)
+    GroupRepository::update_permissions(pool, &g_on.id, true, false, false)
         .await
         .unwrap();
     assert!(GroupRepository::user_allows_api_keys(pool, &user_id)

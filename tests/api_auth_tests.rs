@@ -426,70 +426,11 @@ async fn set_group_permissions(
             "group_id": gid,
             "allow_api_keys": allow_api_keys,
             "allow_password_change": allow_password_change,
+            "allow_bots": false,
         }),
         admin_token,
     )
     .await;
-    assert_eq!(resp.status(), 200);
-}
-
-#[tokio::test]
-async fn test_api_key_creation_requires_group_permission() {
-    let (app, _state, admin_token, user_token, uid) = setup_admin_and_user().await;
-    let gid = create_group_and_add_member(&app, &admin_token, &uid, "api-blocked").await;
-
-    // Group allows neither by default -> creation must be blocked (403)
-    let body = serde_json::json!({
-        "name": "my-key",
-        "scopes": ["files:read"],
-        "expires_in_days": 30,
-    });
-    let resp = helpers::json_post_auth(&app, "/api/api-keys", &body, &user_token).await;
-    assert_eq!(resp.status(), 403);
-
-    // Grant API keys for the group -> creation now allowed
-    set_group_permissions(&app, &admin_token, &gid, true, false).await;
-    let resp = helpers::json_post_auth(&app, "/api/api-keys", &body, &user_token).await;
-    assert_eq!(resp.status(), 200);
-}
-
-#[tokio::test]
-async fn test_api_key_regenerate_requires_group_permission() {
-    let (app, _state, admin_token, user_token, uid) = setup_admin_and_user().await;
-    let gid = create_group_and_add_member(&app, &admin_token, &uid, "reg-blocked").await;
-
-    let resp = helpers::json_post_auth(&app, "/api/api-keys/regenerate", &serde_json::json!({}), &user_token).await;
-    assert_eq!(resp.status(), 403);
-
-    set_group_permissions(&app, &admin_token, &gid, true, false).await;
-    let resp = helpers::json_post_auth(&app, "/api/api-keys/regenerate", &serde_json::json!({}), &user_token).await;
-    assert_eq!(resp.status(), 200);
-}
-
-#[tokio::test]
-async fn test_no_group_user_falls_back_to_global_api_key_setting() {
-    let (app, _state, admin_token, user_token, _uid) = setup_admin_and_user().await;
-
-    let body = serde_json::json!({
-        "name": "my-key",
-        "scopes": ["files:read"],
-        "expires_in_days": 30,
-    });
-
-    // Global setting off, no groups -> blocked
-    let resp = helpers::json_post_auth(&app, "/api/api-keys", &body, &user_token).await;
-    assert_eq!(resp.status(), 403);
-
-    // Enable globally -> allowed
-    let resp = helpers::json_put_auth(
-        &app,
-        "/api/admin/settings",
-        &serde_json::json!({ "key": "allow_user_api_keys", "value": "true" }),
-        &admin_token,
-    )
-    .await;
-    assert_eq!(resp.status(), 200);
-    let resp = helpers::json_post_auth(&app, "/api/api-keys", &body, &user_token).await;
     assert_eq!(resp.status(), 200);
 }
 
@@ -540,24 +481,6 @@ async fn test_no_group_user_falls_back_to_global_password_change_setting() {
 }
 
 #[tokio::test]
-async fn test_any_group_allows_api_keys() {
-    let (app, _state, admin_token, user_token, uid) = setup_admin_and_user().await;
-    // Two groups: one blocks, one allows -> ANY-allow semantics should permit.
-    let gid_block = create_group_and_add_member(&app, &admin_token, &uid, "api-block").await;
-    let gid_allow = create_group_and_add_member(&app, &admin_token, &uid, "api-allow").await;
-    set_group_permissions(&app, &admin_token, &gid_block, false, false).await;
-    set_group_permissions(&app, &admin_token, &gid_allow, true, false).await;
-
-    let body = serde_json::json!({
-        "name": "my-key",
-        "scopes": ["files:read"],
-        "expires_in_days": 30,
-    });
-    let resp = helpers::json_post_auth(&app, "/api/api-keys", &body, &user_token).await;
-    assert_eq!(resp.status(), 200);
-}
-
-#[tokio::test]
 async fn test_account_permissions_endpoint() {
     let (app, _state, admin_token, user_token, uid) = setup_admin_and_user().await;
     let gid = create_group_and_add_member(&app, &admin_token, &uid, "perm-check").await;
@@ -568,6 +491,7 @@ async fn test_account_permissions_endpoint() {
     let json = helpers::response_json(resp).await;
     assert_eq!(json["allow_api_keys"], true);
     assert_eq!(json["allow_password_change"], false);
+    assert_eq!(json["allow_bots"], false);
 }
 
 // ─── Forgot Password Tests ───────────────────────────────────────────────────

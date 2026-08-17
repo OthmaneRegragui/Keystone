@@ -30,6 +30,7 @@ pub async fn get_stats(
         .unwrap_or_else(|_| crate::models::PlatformSettings {
             block_registrations: true,
             allow_user_api_keys: false,
+            allow_user_bots: false,
             allow_user_password_change: false,
         });
 

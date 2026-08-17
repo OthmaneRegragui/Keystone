@@ -14,6 +14,38 @@ fn build_multipart(body: &[u8], filename: &str, bucket: Option<&str>) -> (String
     build_multipart_with_overwrite(body, filename, bucket, None)
 }
 
+/// Multipart upload with an explicit target `folder_id` field.
+fn build_multipart_in_folder(body: &[u8], filename: &str, bucket: &str, folder_id: &str) -> (String, Body) {
+    let boundary = "----testboundary123";
+    let mut multipart_body = Vec::new();
+
+    multipart_body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    multipart_body.extend_from_slice(b"Content-Disposition: form-data; name=\"folder_id\"\r\n\r\n");
+    multipart_body.extend_from_slice(folder_id.as_bytes());
+    multipart_body.extend_from_slice(b"\r\n");
+
+    multipart_body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    multipart_body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
+        )
+        .as_bytes(),
+    );
+    multipart_body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+    multipart_body.extend_from_slice(body);
+    multipart_body.extend_from_slice(b"\r\n");
+
+    multipart_body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    multipart_body.extend_from_slice(b"Content-Disposition: form-data; name=\"bucket\"\r\n\r\n");
+    multipart_body.extend_from_slice(bucket.as_bytes());
+    multipart_body.extend_from_slice(b"\r\n");
+
+    multipart_body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+    let content_type = format!("multipart/form-data; boundary={boundary}");
+    (content_type, Body::from(Bytes::from(multipart_body)))
+}
+
 fn build_multipart_with_overwrite(
     body: &[u8],
     filename: &str,
@@ -91,6 +123,7 @@ async fn setup_bucket_access(state: &AppState, user_id: Uuid, bucket_name: &str)
 
 async fn build_app() -> (axum::Router, Arc<AppState>) {
     let (state, _temp) = helpers::build_test_state().await;
+    helpers::reset_db(&state.db).await;
     let app = keystone::api_routes()
         .layer(axum::extract::Extension(state.clone()))
         .with_state(state.clone());
@@ -785,85 +818,214 @@ async fn test_delete_folder_success() {
     assert!(json["folders"].as_array().unwrap().is_empty());
 }
 
-// ============================================================
-// User API Keys
-// ============================================================
+// ─── Bot endpoint separation ────────────────────────────────────────────
+// Bots may only use the dedicated /api/bot/* namespace (buckets + file/folder
+// operations). Ordinary users and JWT sessions are rejected there, and bot
+// keys are rejected on the regular /api/* endpoints.
 
-#[tokio::test]
-async fn test_create_api_key_requires_auth() {
-    let (app, _state) = build_app().await;
+async fn create_bot_for_user(
+    app: &axum::Router,
+    state: &AppState,
+    user_id: Uuid,
+) -> String {
+    let (_admin_id, _u, admin_email, admin_password) =
+        helpers::create_test_user(&state.db, UserRole::Admin, "pass123").await;
+    let admin_token = helpers::login_user(app, &admin_email, &admin_password).await;
 
-    let resp = helpers::json_post(
-        &app,
-        "/api/api-keys",
+    let resp = helpers::json_post_auth(
+        app,
+        "/api/admin/bots",
         &serde_json::json!({
-            "name": "test-key",
-            "scopes": ["files:read"],
+            "user_id": user_id.to_string(),
+            "name": "ci-bot",
+            "can_upload": true,
+            "can_download": true,
+            "can_copy": true,
+            "can_edit": true,
+            "can_delete": true,
+            "can_list": true,
         }),
+        &admin_token,
     )
     .await;
-    assert_eq!(resp.status(), 401);
+    assert_eq!(resp.status(), 200, "failed to create bot: {:?}", resp.status());
+    let json = helpers::response_json(resp).await;
+    json["full_key"].as_str().unwrap().to_string()
+}
+
+async fn create_bot_with_path_rules(
+    app: &axum::Router,
+    state: &AppState,
+    user_id: Uuid,
+    path_rules: &serde_json::Value,
+) -> String {
+    let (_admin_id, _u, admin_email, admin_password) =
+        helpers::create_test_user(&state.db, UserRole::Admin, "pass123").await;
+    let admin_token = helpers::login_user(app, &admin_email, &admin_password).await;
+
+    let resp = helpers::json_post_auth(
+        app,
+        "/api/admin/bots",
+        &serde_json::json!({
+            "user_id": user_id.to_string(),
+            "name": "ci-path-bot",
+            "can_upload": true,
+            "can_download": true,
+            "can_copy": true,
+            "can_edit": true,
+            "can_delete": true,
+            "can_list": true,
+            "path_rules": path_rules,
+        }),
+        &admin_token,
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "failed to create bot: {:?}", resp.status());
+    let json = helpers::response_json(resp).await;
+    json["full_key"].as_str().unwrap().to_string()
 }
 
 #[tokio::test]
-async fn test_list_api_keys_empty() {
+async fn test_bot_can_use_bot_namespace_only() {
     let (app, state) = build_app().await;
-    let (_id, _username, email, password) =
+    let (user_id, _u, _e, _p) =
         helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
+    setup_bucket_access(&state, user_id, "default").await;
+
+    let bot_key = create_bot_for_user(&app, &state, user_id).await;
+
+    // Bot key works on the dedicated namespace.
+    let resp = helpers::get_auth(&app, "/api/bot/buckets", &bot_key).await;
+    assert_eq!(resp.status(), 200, "bot namespace should accept the bot key");
+
+    // The same bot key is rejected on the regular user endpoint.
+    let resp = helpers::get_auth(&app, "/api/buckets", &bot_key).await;
+    assert_eq!(resp.status(), 403, "bot keys must be rejected on /api/buckets");
+
+    // Bot key cannot reach admin endpoints either.
+    let resp = helpers::get_auth(&app, "/api/admin/stats", &bot_key).await;
+    assert_eq!(resp.status(), 403, "bot keys must be rejected on admin endpoints");
+}
+
+#[tokio::test]
+async fn test_regular_user_rejected_from_bot_namespace() {
+    let (app, state) = build_app().await;
+    let (user_id, _u, email, password) =
+        helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
+    setup_bucket_access(&state, user_id, "default").await;
+
+    let user_token = helpers::login_user(&app, &email, &password).await;
+
+    // A normal JWT session is not a bot and must be rejected on /api/bot/*.
+    let resp = helpers::get_auth(&app, "/api/bot/buckets", &user_token).await;
+    assert_eq!(resp.status(), 403, "regular users must be rejected on the bot namespace");
+
+    // ...while the regular endpoint still works for them.
+    let resp = helpers::get_auth(&app, "/api/buckets", &user_token).await;
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_bot_path_rules_restrict_access() {
+    let (app, state) = build_app().await;
+    let (user_id, _u, email, password) =
+        helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
+    setup_bucket_access(&state, user_id, "default").await;
     let token = helpers::login_user(&app, &email, &password).await;
 
-    let resp = helpers::get_auth(&app, "/api/api-keys", &token).await;
-    assert_eq!(resp.status(), 200);
-
-    let json = helpers::response_json(resp).await;
-    assert!(json.is_array());
-    assert_eq!(json.as_array().unwrap().len(), 0);
-}
-
-#[tokio::test]
-async fn test_create_api_key() {
-    let (app, state) = build_app().await;
-
-    // Non-admin: default allow_user_api_keys is false → 403
-    let (_uid1, _u1, email1, pass1) =
-        helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
-    let token1 = helpers::login_user(&app, &email1, &pass1).await;
-
+    // Create a folder "work" and upload a file into it, plus a root-level file.
     let resp = helpers::json_post_auth(
         &app,
-        "/api/api-keys",
-        &serde_json::json!({
-            "name": "user-key",
-            "scopes": ["files:read"],
-        }),
-        &token1,
-    )
-    .await;
-    assert_eq!(resp.status(), 403);
-
-    // Admin: always allowed → 200
-    let (_uid2, _u2, email2, pass2) =
-        helpers::create_test_user(&state.db, UserRole::Admin, "admin123").await;
-    let token2 = helpers::login_user(&app, &email2, &pass2).await;
-
-    let resp = helpers::json_post_auth(
-        &app,
-        "/api/api-keys",
-        &serde_json::json!({
-            "name": "admin-key",
-            "scopes": ["files:read", "files:write"],
-        }),
-        &token2,
+        "/api/folders",
+        &serde_json::json!({ "name": "work", "bucket_name": "default" }),
+        &token,
     )
     .await;
     assert_eq!(resp.status(), 200);
+    let folder_id = helpers::response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
+    let (ct1, body1) = build_multipart(b"root content", "root.txt", Some("default"));
+    let req1 = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/files")
+        .header("content-type", &ct1)
+        .header("authorization", format!("Bearer {token}"))
+        .body(body1)
+        .unwrap();
+    let resp1 = tower::ServiceExt::oneshot(app.clone(), req1).await.unwrap();
+    assert_eq!(resp1.status(), 200);
+    let root_file_id = helpers::response_json(resp1).await["file"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (ct2, body2) = build_multipart_in_folder(b"work content", "inside.txt", "default", &folder_id);
+    let req2 = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/files")
+        .header("content-type", &ct2)
+        .header("authorization", format!("Bearer {token}"))
+        .body(body2)
+        .unwrap();
+    let resp2 = tower::ServiceExt::oneshot(app.clone(), req2).await.unwrap();
+    assert_eq!(resp2.status(), 200);
+    let inside_file_id = helpers::response_json(resp2).await["file"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // A bot allowed to access only /work must not see the root file.
+    let bot_key = create_bot_with_path_rules(
+        &app,
+        &state,
+        user_id,
+        &serde_json::json!([{ "bucket": "default", "path": "/work", "status": "allow" }]),
+    )
+    .await;
+
+    // Listing the folder shows the allowed file.
+    let resp = helpers::get_auth(
+        &app,
+        &format!("/api/bot/files?bucket=default&folder_id={folder_id}"),
+        &bot_key,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
     let json = helpers::response_json(resp).await;
-    assert_eq!(json["name"], "admin-key");
-    assert!(json["full_key"].as_str().unwrap().len() > 0);
-    assert!(json["prefix"].as_str().unwrap().len() > 0);
-    let scopes = json["scopes"].as_array().unwrap();
-    assert_eq!(scopes.len(), 2);
-    assert!(scopes.contains(&serde_json::json!("files:read")));
-    assert!(scopes.contains(&serde_json::json!("files:write")));
+    let files = json["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "folder listing should show the allowed file");
+    assert_eq!(files[0]["id"], inside_file_id);
+
+    // Listing the root only shows root-level files, and none are allowed.
+    let resp = helpers::get_auth(&app, "/api/bot/files?bucket=default", &bot_key).await;
+    assert_eq!(resp.status(), 200);
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["files"].as_array().unwrap().len(), 0);
+    assert_eq!(json["total"], 0);
+
+    // The allowed file is reachable; the root file is not.
+    let resp = helpers::get_auth(&app, &format!("/api/bot/files/{inside_file_id}"), &bot_key).await;
+    assert_eq!(resp.status(), 200, "allowed file should be readable");
+
+    let resp = helpers::get_auth(&app, &format!("/api/bot/files/{root_file_id}"), &bot_key).await;
+    assert_eq!(resp.status(), 403, "root file must be blocked by path rules");
+
+    // The bucket still shows up (an allow rule makes it reachable).
+    let resp = helpers::get_auth(&app, "/api/bot/buckets", &bot_key).await;
+    assert_eq!(resp.status(), 200);
+    let json = helpers::response_json(resp).await;
+    assert!(
+        json.as_array().unwrap().iter().any(|b| b["name"] == "default"),
+        "bucket with an allow rule must be listed"
+    );
+
+    // Listing the bucket root is forbidden for a sub-path-only rule.
+    let resp = helpers::get_auth(&app, "/api/bot/folders?bucket=default", &bot_key).await;
+    assert_eq!(resp.status(), 403, "sub-path-only bot cannot list the bucket root");
 }
+
+// ============================================================
+

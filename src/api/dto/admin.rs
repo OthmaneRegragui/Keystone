@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use crate::models::{Bucket, PlatformSettings, StoragePath, UserGroup};
+use crate::models::{BotPathRule, Bucket, PlatformSettings, StoragePath, UserGroup};
 use serde::{Deserialize, Serialize};
 
 fn default_true() -> bool { true }
@@ -131,6 +131,7 @@ pub struct UpdateGroupPermissionsRequest {
     pub group_id: String,
     pub allow_api_keys: bool,
     pub allow_password_change: bool,
+    pub allow_bots: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -210,6 +211,35 @@ pub struct AdminStatsDto {
     pub orphaned_physical_files_size: i64,
 }
 
+/// A single orphaned physical file in the admin detail view.
+#[derive(Debug, Serialize)]
+pub struct OrphanedFileDto {
+    pub id: String,
+    pub hash: String,
+    pub name: String,
+    pub size_bytes: i64,
+    pub created_at: String,
+    pub bucket: Option<String>,
+    pub deleted_at: Option<String>,
+    pub owner: Option<String>,
+}
+
+/// Page of orphaned physical files for the admin UI.
+#[derive(Debug, Serialize)]
+pub struct OrphanedFilesDto {
+    pub total: i64,
+    pub total_size_bytes: i64,
+    pub files: Vec<OrphanedFileDto>,
+}
+
+/// Result of purging orphaned physical files.
+#[derive(Debug, Serialize)]
+pub struct OrphanedDeleteResultDto {
+    pub deleted: usize,
+    pub failed: usize,
+    pub errors: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct AdminUserDto {
     pub id: String,
@@ -230,6 +260,7 @@ pub struct GroupDto {
     pub bucket_count: i64,
     pub allow_api_keys: bool,
     pub allow_password_change: bool,
+    pub allow_bots: bool,
 }
 
 impl GroupDto {
@@ -242,6 +273,7 @@ impl GroupDto {
             bucket_count,
             allow_api_keys: group.allow_api_keys,
             allow_password_change: group.allow_password_change,
+            allow_bots: group.allow_bots,
         }
     }
 }
@@ -267,6 +299,7 @@ pub struct GroupDetailDto {
     pub buckets: Vec<GroupBucketDto>,
     pub allow_api_keys: bool,
     pub allow_password_change: bool,
+    pub allow_bots: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -281,6 +314,70 @@ pub struct AdminApiKeyDto {
     pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub is_active: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminBotDto {
+    pub id: String,
+    pub user_id: String,
+    pub username: String,
+    pub key_id: String,
+    pub prefix: String,
+    pub name: String,
+    pub can_upload: bool,
+    pub can_download: bool,
+    pub can_copy: bool,
+    pub can_edit: bool,
+    pub can_delete: bool,
+    pub can_list: bool,
+    pub path_rules: Option<Vec<BotPathRule>>,
+    pub upload_limit_bytes: i64,
+    pub uploaded_bytes: i64,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateAdminBotRequest {
+    pub user_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub can_upload: bool,
+    #[serde(default)]
+    pub can_download: bool,
+    #[serde(default)]
+    pub can_copy: bool,
+    #[serde(default)]
+    pub can_edit: bool,
+    #[serde(default)]
+    pub can_delete: bool,
+    #[serde(default = "default_true")]
+    pub can_list: bool,
+    #[serde(default)]
+    pub path_rules: Option<Vec<BotPathRule>>,
+    #[serde(default)]
+    pub upload_limit_bytes: i64,
+    pub expires_in_days: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminUpdateBotRequest {
+    pub name: Option<String>,
+    pub can_upload: Option<bool>,
+    pub can_download: Option<bool>,
+    pub can_copy: Option<bool>,
+    pub can_edit: Option<bool>,
+    pub can_delete: Option<bool>,
+    pub can_list: Option<bool>,
+    pub path_rules: Option<Option<Vec<BotPathRule>>>,
+    pub upload_limit_bytes: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminBotPathRequest {
+    pub id: String,
 }
 
 // ─── Storage Paths ───────────────────────────────────────────

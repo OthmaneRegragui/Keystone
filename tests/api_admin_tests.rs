@@ -4,6 +4,7 @@ use keystone::models::UserRole;
 
 async fn setup_admin() -> (axum::Router, String, std::sync::Arc<keystone::AppState>, tempfile::TempDir) {
     let (state, temp) = helpers::build_test_state().await;
+    helpers::reset_db(&state.db).await;
     let app = keystone::api_routes()
         .layer(axum::extract::Extension(state.clone()))
         .with_state(state.clone());
@@ -14,6 +15,7 @@ async fn setup_admin() -> (axum::Router, String, std::sync::Arc<keystone::AppSta
 
 async fn setup_user() -> (axum::Router, String, std::sync::Arc<keystone::AppState>, tempfile::TempDir) {
     let (state, temp) = helpers::build_test_state().await;
+    helpers::reset_db(&state.db).await;
     let app = keystone::api_routes()
         .layer(axum::extract::Extension(state.clone()))
         .with_state(state.clone());

@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bots - Keystone</title>
+    <link rel="icon" type="image/svg+xml" href="/logo.svg">
+    <script defer src="/static/vendor/alpine.min.js"></script>
+    <script src="/static/vendor/tailwind.min.js"></script>
+    <style>
+        html:not(.dark) { color-scheme: light; }
+        html.dark { color-scheme: dark; }
+        html.dark body { background-color: #131316 !important; }
+        html.dark .bg-gray-50 { background-color: #131316 !important; }
+        html.dark .bg-white { background-color: #1a1a1f !important; }
+        html.dark .bg-gray-100 { background-color: #202027 !important; }
+        html.dark .bg-gray-200 { background-color: #26262e !important; }
+        html.dark .bg-gray-300 { background-color: #303038 !important; }
+        html.dark .text-gray-900 { color: #e8e8ea !important; }
+        html.dark .text-gray-800 { color: #d6d6da !important; }
+        html.dark .text-gray-700 { color: #c2c2c8 !important; }
+        html.dark .text-gray-600 { color: #a3a3ac !important; }
+        html.dark .text-gray-500 { color: #83838d !important; }
+        html.dark .text-gray-400 { color: #63636e !important; }
+        html.dark .text-gray-300 { color: #4c4c56 !important; }
+        html.dark .text-indigo-600, html.dark .text-indigo-500 { color: #a5b4fc !important; }
+        html.dark .text-indigo-700 { color: #93a0f7 !important; }
+        html.dark .text-indigo-800 { color: #b1c0ff !important; }
+        html.dark .text-red-600 { color: #f87171 !important; }
+        html.dark .text-red-500 { color: #f87171 !important; }
+        html.dark .text-red-400 { color: #f87171 !important; }
+        html.dark .text-green-600 { color: #4ade80 !important; }
+        html.dark .text-amber-600 { color: #fbbf24 !important; }
+        html.dark .border-gray-100 { border-color: #232329 !important; }
+        html.dark .border-gray-200 { border-color: #2d2d34 !important; }
+        html.dark .border-gray-300 { border-color: #3b3b45 !important; }
+        html.dark .placeholder-gray-400::placeholder { color: #63636e !important; }
+        html.dark .hover\:bg-gray-50:hover { background-color: #202027 !important; }
+        html.dark .hover\:bg-gray-100:hover { background-color: #202027 !important; }
+        html.dark .hover\:bg-gray-200:hover { background-color: #26262e !important; }
+        html.dark .bg-blue-100 { background-color: #1e2b40 !important; }
+        html.dark .bg-green-100 { background-color: #1c3526 !important; }
+        html.dark .bg-red-100 { background-color: #3d2323 !important; }
+        html.dark .bg-purple-100 { background-color: #2b2040 !important; }
+        html.dark .bg-yellow-100 { background-color: #332b17 !important; }
+        html.dark .bg-orange-100 { background-color: #3a2415 !important; }
+        html.dark .bg-emerald-100 { background-color: #1c3526 !important; }
+        html.dark .text-blue-600 { color: #93c5fd !important; }
+        html.dark .text-blue-700 { color: #93c5fd !important; }
+        html.dark .text-green-600 { color: #4ade80 !important; }
+        html.dark .text-green-700 { color: #86efac !important; }
+        html.dark .text-purple-600 { color: #c4b5fd !important; }
+        html.dark .text-yellow-600 { color: #fbbf24 !important; }
+        html.dark .text-orange-600 { color: #fb923c !important; }
+        html.dark .text-emerald-700 { color: #86efac !important; }
+        html.dark [x-cloak] { display: none !important; }
+        html.dark input:not([type="checkbox"]):not([type="radio"]),
+        html.dark select {
+            background-color: #202027 !important;
+            border-color: #3b3b45 !important;
+            color: #e8e8ea !important;
+        }
+        html.dark input::placeholder,
+        html.dark textarea::placeholder { color: #63636e !important; }
+        html.dark select option { background-color: #1a1a1f !important; color: #e8e8ea !important; }
+        .no-select { user-select: none; }
+    </style>
+</head>
+<body class="h-full bg-gray-50">
+    <script>
+        (function() {
+            var savedTheme = null;
+            try { savedTheme = localStorage.getItem('theme'); } catch (e) {}
+            var dark = savedTheme ? savedTheme === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+            if (dark) document.documentElement.classList.add('dark');
+        })();
+        function clearAuth() {
+            try { localStorage.removeItem('token'); } catch (e) {}
+            try { localStorage.removeItem('refresh_token'); } catch (e) {}
+            try { localStorage.removeItem('user'); } catch (e) {}
+        }
+        (function() {
+            var token = null;
+            try { token = localStorage.getItem('token'); } catch (e) {}
+            if (!token) { window.location.href = '/login'; return; }
+            try {
+                var payload = JSON.parse(atob(token.split('.')[1]));
+                var now = Math.floor(Date.now() / 1000);
+                if (payload.exp && payload.exp < now) {
+                    fetch('/auth/refresh', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' })
+                        .then(function(r) { if (!r.ok) { clearAuth(); window.location.href = '/login'; return null; } return r.json(); })
+                        .then(function(d) { if (d) { try { localStorage.setItem('token', d.access_token); localStorage.setItem('user', JSON.stringify(d.user)); } catch (e) {} } })
+                        .catch(function() { clearAuth(); window.location.href = '/login'; });
+                }
+            } catch(e) { clearAuth(); window.location.href = '/login'; }
+        })();
+        function fmtBytes(b) {
+            var n = Number(b);
+            if (!Number.isFinite(n) || n <= 0) return '0 B';
+            var u = ['B','KB','MB','GB','TB'];
+            var i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), u.length - 1);
+            return (n / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + u[i];
+        }
+        function fmtDate(s) {
+            if (!s) return '—';
+            var d = new Date(s);
+            if (isNaN(d.getTime())) return '—';
+            return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) +
+                ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+        }
+        function sidebar() {
+            var u = null;
+            try { u = JSON.parse(localStorage.getItem('user') || 'null'); } catch (e) { u = null; }
+            return {
+                user: u,
+                userName: u ? u.username : '',
+                userEmail: u ? u.email : '',
+                userInitial: u && u.username ? u.username.charAt(0).toUpperCase() : '?',
+                active: function(p) { return window.location.pathname === p; },
+                themeDark: document.documentElement.classList.contains('dark'),
+                toggleTheme: function() {
+                    this.themeDark = !this.themeDark;
+                    document.documentElement.classList.toggle('dark', this.themeDark);
+                    try { localStorage.setItem('theme', this.themeDark ? 'dark' : 'light'); } catch (e) {}
+                },
+                sidebarOpen: false,
+                toggleSidebar: function() { this.sidebarOpen = !this.sidebarOpen; },
+                closeSidebar: function() { this.sidebarOpen = false; },
+                logout: function() {
+                    try { fetch('/auth/logout', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' }); } catch (e) {}
+                    clearAuth();
+                    window.location.href = '/login';
+                }
+            };
+        }
+        function botsPage() {
+            return {
+                bots: [],
+                users: [],
+                buckets: [],
+                loading: true,
+                error: '',
+                isAdmin: false,
+                canManage: false,
+                userId: '',
+                search: '',
+                sortBy: 'name',
+                sortAsc: true,
+                showCreate: false,
+                showEditId: null,
+                busy: false,
+                formError: '',
+                form: {
+                    user_id: '',
+                    name: '',
+                    can_upload: false,
+                    can_download: false,
+                    can_copy: false,
+                    can_edit: false,
+                    can_delete: false,
+                    can_list: true,
+                    path_rules: [],
+                    upload_limit_bytes: 0,
+                    expires_in_days: ''
+                },
+                createdKey: null,
+                editing: null,
+                init: function() {
+                    var self = this;
+                    var token = null;
+                    try { token = localStorage.getItem('token'); } catch (e) {}
+                    var u = null;
+                    try { u = JSON.parse(localStorage.getItem('user') || 'null'); } catch (e) { u = null; }
+                    if (!token || !u) { clearAuth(); window.location.href = '/login'; return; }
+                    self.userId = u.id || '';
+                    self.isAdmin = u.role === 'admin';
+                    if (self.isAdmin) {
+                        self.canManage = true;
+                        self.load();
+                        return;
+                    }
+                    self.authFetch('/api/me/permissions')
+                        .then(function(r) { return r.ok ? r.json() : null; })
+                        .then(function(d) {
+                            self.canManage = !!(d && d.allow_bots);
+                            if (self.canManage) { self.load(); }
+                            else { self.loading = false; }
+                        })
+                        .catch(function() { self.loading = false; });
+                },
+                authFetch: function(url, opts) {
+                    var token = null;
+                    try { token = localStorage.getItem('token'); } catch (e) {}
+                    opts = opts || {};
+                    opts.headers = Object.assign(opts.headers || {}, { 'Authorization': 'Bearer ' + token });
+                    return fetch(url, opts).then(function(res) {
+                        if (res.status === 401) { clearAuth(); window.location.href = '/login'; }
+                        return res;
+                    });
+                },
+                load: function() {
+                    var self = this;
+                    self.loading = true;
+                    self.error = '';
+                    self.authFetch('/api/admin/bots')
+                        .then(function(r) {
+                            if (!r.ok) throw new Error('request failed');
+                            return r.json();
+                        })
+                        .then(function(d) { self.bots = d || []; self.loading = false; })
+                        .catch(function() { self.loading = false; self.error = 'Failed to load bots.'; });
+                    if (self.isAdmin) {
+                        self.authFetch('/api/admin/users')
+                            .then(function(r) { return r.ok ? r.json() : []; })
+                            .then(function(d) { self.users = d || []; })
+                            .catch(function() {});
+                        self.authFetch('/api/admin/buckets')
+                            .then(function(r) { return r.ok ? r.json() : []; })
+                            .then(function(d) { self.buckets = d || []; })
+                            .catch(function() {});
+                    } else {
+                        self.authFetch('/api/buckets')
+                            .then(function(r) { return r.ok ? r.json() : []; })
+                            .then(function(d) { self.buckets = d || []; })
+                            .catch(function() {});
+                    }
+                },
+                visibleBots: function() {
+                    var self = this;
+                    var q = (self.search || '').toLowerCase().trim();
+                    var list = self.bots.filter(function(b) {
+                        if (!q) return true;
+                        var name = String(b.name || '').toLowerCase();
+                        var owner = String(b.username || '').toLowerCase();
+                        var prefix = String(b.prefix || '').toLowerCase();
+                        return name.indexOf(q) >= 0 || owner.indexOf(q) >= 0 || prefix.indexOf(q) >= 0;
+                    });
+                    var by = self.sortBy;
+                    var asc = self.sortAsc ? 1 : -1;
+                    list.sort(function(a, b) {
+                        var va = a[by], vb = b[by];
+                        if (by === 'upload_limit_bytes' || by === 'uploaded_bytes') return (va - vb) * asc;
+                        if (by === 'created_at' || by === 'expires_at') {
+                            va = va ? Date.parse(va) : 0;
+                            vb = vb ? Date.parse(vb) : 0;
+                            return (va - vb) * asc;
+                        }
+                        va = String(va == null ? '' : va).toLowerCase();
+                        vb = String(vb == null ? '' : vb).toLowerCase();
+                        if (va < vb) return -1 * asc;
+                        if (va > vb) return 1 * asc;
+                        return 0;
+                    });
+                    return list;
+                },
+                setSort: function(by) {
+                    if (this.sortBy === by) { this.sortAsc = !this.sortAsc; }
+                    else { this.sortBy = by; this.sortAsc = true; }
+                },
+                sortIcon: function(field) {
+                    if (this.sortBy !== field) return '↕';
+                    return this.sortAsc ? '↑' : '↓';
+                },
+                scopes: function(b) {
+                    var out = [];
+                    if (b.can_upload) out.push('upload');
+                    if (b.can_download) out.push('download');
+                    if (b.can_copy) out.push('copy');
+                    if (b.can_edit) out.push('edit');
+                    if (b.can_delete) out.push('delete');
+                    if (b.can_list) out.push('list');
+                    return out;
+                },
+                emptyForm: function() {
+                    return {
+                        user_id: '',
+                        name: '',
+                        can_upload: false,
+                        can_download: false,
+                        can_copy: false,
+                        can_edit: false,
+                        can_delete: false,
+                        can_list: true,
+                        path_rules: [],
+                        upload_limit_bytes: 0,
+                        expires_in_days: ''
+                    };
+                },
+                openCreate: function() {
+                    this.form = this.emptyForm();
+                    if (this.isAdmin && this.users.length > 0) this.form.user_id = this.users[0].id;
+                    if (!this.isAdmin) this.form.user_id = this.userId;
+                    this.showCreate = true;
+                    this.showEditId = null;
+                    this.formError = '';
+                    this.createdKey = null;
+                },
+                openEdit: function(b) {
+                    this.editing = b;
+                    this.form = {
+                        user_id: b.user_id,
+                        name: b.name,
+                        can_upload: b.can_upload,
+                        can_download: b.can_download,
+                        can_copy: b.can_copy,
+                        can_edit: b.can_edit,
+                        can_delete: b.can_delete,
+                        can_list: b.can_list,
+                        path_rules: (b.path_rules || []).map(function(r) { return { bucket: r.bucket, path: r.path, status: r.status }; }),
+                        upload_limit_bytes: b.upload_limit_bytes,
+                        expires_in_days: ''
+                    };
+                    this.showEditId = b.id;
+                    this.showCreate = false;
+                    this.formError = '';
+                    this.createdKey = null;
+                },
+                closeModals: function() {
+                    this.showCreate = false;
+                    this.showEditId = null;
+                    this.editing = null;
+                    this.formError = '';
+                    this.createdKey = null;
+                },
+                addRule: function() {
+                    var bucket = this.buckets.length ? this.buckets[0].name : '';
+                    this.form.path_rules.push({ bucket: bucket, path: '', status: 'allow' });
+                },
+                removeRule: function(i) {
+                    this.form.path_rules.splice(i, 1);
+                },
+                submitCreate: function() {
+                    var self = this;
+                    if (self.busy) return;
+                    self.formError = '';
+                    var payload = {
+                        user_id: self.form.user_id,
+                        name: self.form.name.trim(),
+                        can_upload: self.form.can_upload,
+                        can_download: self.form.can_download,
+                        can_copy: self.form.can_copy,
+                        can_edit: self.form.can_edit,
+                        can_delete: self.form.can_delete,
+                        can_list: self.form.can_list,
+                        path_rules: self.form.path_rules.length ? self.form.path_rules : null,
+                        upload_limit_bytes: Number(self.form.upload_limit_bytes) || 0,
+                        expires_in_days: self.form.expires_in_days === '' ? null : (Number(self.form.expires_in_days) || 0)
+                    };
+                    if (!payload.user_id) { self.formError = 'Please select an owner user.'; return; }
+                    if (!payload.name) { self.formError = 'Please enter a bot name.'; return; }
+                    self.busy = true;
+                    self.authFetch('/api/admin/bots', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    })
+                        .then(function(r) {
+                            if (r.status === 422 || r.status === 400) {
+                                return r.json().then(function(d) { throw new Error(d.detail || 'Invalid input.'); });
+                            }
+                            if (!r.ok) throw new Error('request failed');
+                            return r.json();
+                        })
+                        .then(function(d) {
+                            self.busy = false;
+                            self.createdKey = d;
+                            self.load();
+                        })
+                        .catch(function(e) {
+                            self.busy = false;
+                            self.formError = e.message || 'Failed to create bot.';
+                        });
+                },
+                submitEdit: function() {
+                    var self = this;
+                    if (self.busy || !self.editing) return;
+                    self.formError = '';
+                    var payload = {
+                        name: self.form.name.trim(),
+                        can_upload: self.form.can_upload,
+                        can_download: self.form.can_download,
+                        can_copy: self.form.can_copy,
+                        can_edit: self.form.can_edit,
+                        can_delete: self.form.can_delete,
+                        can_list: self.form.can_list,
+                        path_rules: self.form.path_rules.length ? self.form.path_rules : [],
+                        upload_limit_bytes: Number(self.form.upload_limit_bytes) || 0
+                    };
+                    self.busy = true;
+                    self.authFetch('/api/admin/bots/' + self.editing.id, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    })
+                        .then(function(r) {
+                            if (r.status === 422 || r.status === 400) {
+                                return r.json().then(function(d) { throw new Error(d.detail || 'Invalid input.'); });
+                            }
+                            if (!r.ok) throw new Error('request failed');
+                            return r.json();
+                        })
+                        .then(function() {
+                            self.busy = false;
+                            self.closeModals();
+                            self.load();
+                        })
+                        .catch(function(e) {
+                            self.busy = false;
+                            self.formError = e.message || 'Failed to update bot.';
+                        });
+                },
+                deleteBot: function(b) {
+                    var self = this;
+                    if (self.busy) return;
+                    if (!confirm('Delete bot "' + b.name + '" and revoke its API key?\n\nThis cannot be undone.')) return;
+                    self.busy = true;
+                    self.authFetch('/api/admin/bots/' + b.id, { method: 'DELETE' })
+                        .then(function(r) {
+                            if (!r.ok) throw new Error('delete failed');
+                            return r.json();
+                        })
+                        .then(function() {
+                            self.busy = false;
+                            self.load();
+                        })
+                        .catch(function() {
+                            self.busy = false;
+                            alert('Failed to delete the bot.');
+                        });
+                },
+                copyKey: function() {
+                    var self = this;
+                    if (!self.createdKey || !self.createdKey.full_key) return;
+                    try {
+                        if (navigator.clipboard && navigator.clipboard.writeText) {
+                            navigator.clipboard.writeText(self.createdKey.full_key);
+                        } else {
+                            var ta = document.createElement('textarea');
+                            ta.value = self.createdKey.full_key;
+                            document.body.appendChild(ta);
+                            ta.select();
+                            document.execCommand('copy');
+                            document.body.removeChild(ta);
+                        }
+                    } catch (e) {}
+                },
+                userLabel: function(id) {
+                    var u = this.users.find(function(x) { return x.id === id; });
+                    return u ? u.username : id;
+                }
+            };
+        }
+    </script>
+    <div class="flex h-full" x-data="sidebar()" x-on:keydown.escape.window="closeSidebar()">
+        <div x-show="sidebarOpen" x-cloak class="fixed inset-0 z-30 bg-black/40 lg:hidden" x-on:click="closeSidebar()" style="display:none;"></div>
+        <aside class="fixed inset-y-0 left-0 z-40 w-64 bg-white border-r border-gray-200 flex flex-col shrink-0 transition-transform duration-200 ease-in-out lg:static lg:translate-x-0"
+            :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'">
+            <div class="p-6 border-b border-gray-200">
+                <h1 class="flex items-center gap-2 text-xl font-bold text-gray-900"><img src="/logo.svg" alt="Keystone logo" class="w-7 h-7 shrink-0">Keystone</h1>
+            </div>
+            <nav class="flex-1 p-4 space-y-1">
+                <a href="/" x-on:click="closeSidebar()" :class="active('/') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+                    Dashboard
+                </a>
+                <a href="/files" x-on:click="closeSidebar()" :class="active('/files') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+                    Files
+                </a>
+                <a href="/account" x-on:click="closeSidebar()" :class="active('/account') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                    Account
+                </a>
+                <a href="/bots" x-on:click="closeSidebar()" :class="active('/bots') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9z"/></svg>
+                    Bots
+                </a>
+                <template x-if="user && user.role === 'admin'">
+                    <a href="/admin?page=overview" x-on:click="closeSidebar()" :class="active('/admin') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                        Admin
+                    </a>
+                </template>
+                <template x-if="user && user.role === 'admin'">
+                    <a href="/docs" x-on:click="closeSidebar()" :class="active('/docs') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
+                        Documentation
+                    </a>
+                </template>
+            </nav>
+            <div class="p-4 border-t border-gray-200 space-y-3">
+                <div class="flex items-center gap-3">
+                    <div class="w-8 h-8 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-700 font-medium text-sm" x-text="userInitial"></div>
+                    <div class="flex-1 min-w-0">
+                        <p class="text-sm font-medium text-gray-900 truncate" x-text="userName"></p>
+                        <p class="text-xs text-gray-400 truncate" x-text="userEmail"></p>
+                    </div>
+                </div>
+                <div class="flex items-center justify-between px-1">
+                    <span class="text-sm text-gray-600 flex items-center gap-2">
+                        <svg x-show="!themeDark" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+                        <svg x-show="themeDark" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
+                        <span x-text="themeDark ? 'Dark mode' : 'Light mode'"></span>
+                    </span>
+                    <button x-on:click="toggleTheme()" role="switch" :aria-checked="themeDark"
+                        :class="themeDark ? 'bg-indigo-600' : 'bg-gray-300'"
+                        class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none">
+                        <span :class="themeDark ? 'translate-x-4' : 'translate-x-0'"
+                            class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                    </button>
+                </div>
+                <button x-on:click="logout(); closeSidebar()" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-red-600 hover:bg-red-50 transition">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+                    Sign Out
+                </button>
+                <div class="px-1 pt-1 text-xs text-gray-400">Keystone v__KEYSTONE_VERSION__</div>
+            </div>
+        </aside>
+
+        <main class="flex-1 overflow-auto flex flex-col" x-data="botsPage()" x-init="init()">
+            <!-- Mobile header -->
+            <div class="lg:hidden flex items-center gap-3 px-4 py-3 bg-white border-b border-gray-200 shrink-0">
+                <button x-on:click="toggleSidebar()" class="p-2 -ml-2 rounded-lg text-gray-600 hover:bg-gray-100 transition" aria-label="Toggle navigation menu">
+                    <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+                </button>
+                <span class="text-base font-semibold text-gray-900">Bots</span>
+            </div>
+
+            <!-- Access gate -->
+            <div x-show="!isAdmin && !canManage" class="h-full flex items-center justify-center p-8">
+                <div class="text-center max-w-md">
+                    <img src="/logo.svg" alt="Keystone logo" class="w-16 h-16 mx-auto mb-4 opacity-40">
+                    <h2 class="text-xl font-bold text-gray-900 mb-2">Restricted</h2>
+                    <p class="text-sm text-gray-500 mb-6">Bots are not enabled for your account. Contact an administrator.</p>
+                    <a href="/files" class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700">Back to Files</a>
+                </div>
+            </div>
+
+            <!-- Content -->
+            <div x-show="isAdmin || canManage" class="p-4 sm:p-8 max-w-7xl w-full mx-auto">
+                <!-- Header -->
+                <div class="flex flex-wrap items-center justify-between gap-3 mb-6">
+                    <div class="flex items-center gap-3">
+                        <a :href="isAdmin ? '/admin?page=overview' : '/files'" class="p-2 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition" title="Back">
+                            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+                        </a>
+                        <div>
+                            <h2 class="text-2xl font-bold text-gray-900">Bots</h2>
+                            <p class="text-sm text-gray-500 mt-0.5">Automated file operation accounts with scoped API keys.</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button x-on:click="openCreate()"
+                            class="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 transition">
+                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                            New Bot
+                        </button>
+                        <button x-on:click="load()" :disabled="busy || loading"
+                            :class="busy || loading ? 'opacity-50 pointer-events-none' : ''"
+                            class="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 transition">
+                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                            Refresh
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Toolbar -->
+                <div class="flex flex-wrap items-center gap-2 mb-4">
+                    <div class="relative flex-1 min-w-[180px] max-w-xs">
+                        <svg class="w-4 h-4 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                        <input type="text" x-model="search"
+                            placeholder="Search name, owner, prefix…"
+                            class="w-full rounded-lg border border-gray-200 bg-white pl-8 pr-2 py-1.5 text-sm focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition">
+                    </div>
+                </div>
+
+                <!-- Loading -->
+                <div x-show="loading" class="bg-white rounded-xl shadow-sm border border-gray-200 p-10 text-center text-sm text-gray-400">Loading bots…</div>
+
+                <!-- Error -->
+                <div x-show="!loading && error" class="bg-white rounded-xl shadow-sm border border-red-200 p-10 text-center text-sm text-red-500" x-text="error"></div>
+
+                <!-- Empty -->
+                <div x-show="!loading && !error && bots.length === 0" class="bg-white rounded-xl shadow-sm border border-gray-200 p-14 text-center">
+                    <svg class="w-14 h-14 mx-auto text-gray-300 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9z"/></svg>
+                    <h3 class="text-lg font-semibold text-gray-900">No bots</h3>
+                    <p class="text-sm text-gray-500 mt-1">Create your first bot to enable automated file operations.</p>
+                    <button x-on:click="openCreate()" class="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 transition">
+                        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                        New Bot
+                    </button>
+                </div>
+
+                <!-- List -->
+                <div x-show="!loading && !error && bots.length > 0" class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead>
+                                <tr class="text-left text-gray-500 border-b border-gray-100">
+                                    <th class="px-4 py-3 font-medium cursor-pointer select-none hover:text-gray-700" x-on:click="setSort('name')">Name <span x-text="sortIcon('name')"></span></th>
+                                    <th x-show="isAdmin" class="px-4 py-3 font-medium cursor-pointer select-none hover:text-gray-700" x-on:click="setSort('username')">Owner <span x-text="sortIcon('username')"></span></th>
+                                    <th class="px-4 py-3 font-medium">Permissions</th>
+                                    <th class="px-4 py-3 font-medium cursor-pointer select-none hover:text-gray-700" x-on:click="setSort('upload_limit_bytes')">Upload Limit <span x-text="sortIcon('upload_limit_bytes')"></span></th>
+                                    <th class="px-4 py-3 font-medium cursor-pointer select-none hover:text-gray-700" x-on:click="setSort('expires_at')">Expires <span x-text="sortIcon('expires_at')"></span></th>
+                                    <th class="px-4 py-3 font-medium">Status</th>
+                                    <th class="px-4 py-3 font-medium text-right">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-100">
+                                <template x-for="b in visibleBots()" :key="b.id">
+                                    <tr class="hover:bg-gray-50 transition">
+                                        <td class="px-4 py-2.5">
+                                            <div class="flex items-center gap-2.5">
+                                                <div class="w-8 h-8 rounded-md bg-indigo-100 text-indigo-700 flex items-center justify-center shrink-0">
+                                                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9z"/></svg>
+                                                </div>
+                                                <div class="min-w-0">
+                                                    <p class="text-gray-800 font-medium truncate" x-text="b.name"></p>
+                                                    <p class="text-xs text-gray-400 font-mono truncate" x-text="b.prefix"></p>
+                                                </div>
+                                            </div>
+                                        </td>
+                                        <td x-show="isAdmin" class="px-4 py-2.5 text-gray-600 whitespace-nowrap" x-text="b.username || '—'"></td>
+                                        <td class="px-4 py-2.5">
+                                            <div class="flex flex-wrap gap-1">
+                                                <template x-for="s in scopes(b)" :key="s">
+                                                    <span class="px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[11px] font-medium uppercase" x-text="s"></span>
+                                                </template>
+                                            </div>
+                                        </td>
+                                        <td class="px-4 py-2.5 text-gray-600 whitespace-nowrap" x-text="b.upload_limit_bytes > 0 ? fmtBytes(b.upload_limit_bytes) : 'Unlimited'"></td>
+                                        <td class="px-4 py-2.5 text-gray-600 whitespace-nowrap" x-text="fmtDate(b.expires_at)"></td>
+                                        <td class="px-4 py-2.5 whitespace-nowrap">
+                                            <span x-show="b.is_active && (!b.expires_at || new Date(b.expires_at) > new Date())"
+                                                class="px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs font-medium">Active</span>
+                                            <span x-show="!b.is_active"
+                                                class="px-2 py-0.5 bg-red-100 text-red-600 rounded-full text-xs font-medium">Revoked</span>
+                                            <span x-show="b.is_active && b.expires_at && new Date(b.expires_at) <= new Date()"
+                                                class="px-2 py-0.5 bg-gray-100 text-gray-500 rounded-full text-xs font-medium">Expired</span>
+                                        </td>
+                                        <td class="px-4 py-2.5 text-right whitespace-nowrap">
+                                            <button x-on:click="openEdit(b)"
+                                                class="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium text-indigo-600 hover:bg-indigo-50 transition">
+                                                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                                                Edit
+                                            </button>
+                                            <button x-on:click="deleteBot(b)"
+                                                class="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium text-red-600 hover:bg-red-50 transition">
+                                                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                                                Delete
+                                            </button>
+                                        </td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- CREATE MODAL -->
+            <div x-show="(isAdmin || canManage) && showCreate" x-cloak class="fixed inset-0 z-50 flex items-center justify-center p-4" style="display:none;">
+                <div class="fixed inset-0 bg-black/40" x-on:click="closeModals()"></div>
+                <div class="relative bg-white rounded-xl shadow-xl border border-gray-200 w-full max-w-lg max-h-[90vh] overflow-y-auto p-6">
+                    <template x-if="!createdKey">
+                        <div>
+                            <h3 class="text-lg font-semibold text-gray-900 mb-1">New Bot</h3>
+                            <p class="text-sm text-gray-500 mb-5">Creates a scoped API key the bot uses for automated file operations.</p>
+                            <div class="space-y-4">
+                                <div x-show="isAdmin">
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Owner user</label>
+                                    <select x-model="form.user_id" class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition">
+                                        <template x-for="u in users" :key="u.id">
+                                            <option :value="u.id" x-text="u.username + (u.email ? ' (' + u.email + ')' : '')"></option>
+                                        </template>
+                                    </select>
+                                </div>
+                                <div x-show="!isAdmin">
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Owner</label>
+                                    <p class="text-sm text-gray-600">You (own account)</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                                    <input type="text" x-model="form.name" placeholder="deploy-bot" maxlength="100"
+                                        class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Permissions</label>
+                                    <div class="grid grid-cols-2 gap-2">
+                                        <template x-for="p in ['can_upload','can_download','can_copy','can_edit','can_delete','can_list']" :key="p">
+                                            <label class="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                                                <input type="checkbox" :checked="form[p]" x-on:change="form[p] = !form[p]" class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
+                                                <span x-text="p.replace('can_', '')"></span>
+                                            </label>
+                                        </template>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-2">Path rules</label>
+                                    <p class="text-xs text-gray-400 mb-2">A bucket with no rule is fully accessible. Empty path = the whole bucket. Block rules always override allow rules.</p>
+                                    <div class="border border-gray-200 rounded-lg overflow-hidden">
+                                        <table class="w-full text-sm">
+                                            <thead>
+                                                <tr class="bg-gray-100 text-left text-xs text-gray-500">
+                                                    <th class="px-3 py-2">Bucket</th>
+                                                    <th class="px-3 py-2">Path</th>
+                                                    <th class="px-3 py-2">Status</th>
+                                                    <th class="px-2 py-2 w-8"></th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <template x-for="(rule, i) in form.path_rules" :key="i">
+                                                    <tr>
+                                                        <td class="px-3 py-2 align-top">
+                                                            <select x-model="rule.bucket"
+                                                                class="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition">
+                                                                <template x-for="b in buckets" :key="b.name">
+                                                                    <option :value="b.name" x-text="b.name"></option>
+                                                                </template>
+                                                            </select>
+                                                        </td>
+                                                        <td class="px-3 py-2 align-top">
+                                                            <input type="text" x-model="rule.path" placeholder="/folder/subfolder or empty"
+                                                                class="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition">
+                                                        </td>
+                                                        <td class="px-3 py-2 align-top">
+                                                            <select x-model="rule.status"
+                                                                class="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition">
+                                                                <option value="allow">allow</option>
+                                                                <option value="block">block</option>
+                                                            </select>
+                                                        </td>
+                                                        <td class="px-2 py-2 align-top text-right">
+                                                            <button x-on:click="removeRule(i)" title="Remove rule"
+                                                                class="text-red-500 hover:text-red-700 transition">✕</button>
+                                                        </td>
+                                                    </tr>
+                                                </template>
+                                                <tr x-show="form.path_rules.length === 0">
+                                                    <td colspan="4" class="px-3 py-3 text-xs text-gray-400">No rules — the bot can access every bucket the owner can reach.</td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                    <button x-on:click="addRule()" class="mt-2 text-sm font-medium text-indigo-600 hover:text-indigo-700 transition">+ Add rule</button>
+                                </div>
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-700 mb-1">Upload limit (bytes)</label>
+                                        <input type="number" min="0" x-model="form.upload_limit_bytes"
+                                            class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition">
+                                        <p class="text-xs text-gray-400 mt-1">0 = unlimited</p>
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-700 mb-1">Expires in (days)</label>
+                                        <input type="number" min="1" max="3650" x-model="form.expires_in_days" placeholder="never"
+                                            class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition">
+                                        <p class="text-xs text-gray-400 mt-1">Leave empty for no expiry</p>
+                                    </div>
+                                </div>
+                                <p x-show="formError" class="text-sm text-red-600" x-text="formError"></p>
+                            </div>
+                            <div class="flex items-center justify-end gap-2 mt-6">
+                                <button x-on:click="closeModals()" class="px-4 py-2 rounded-lg border border-gray-200 text-sm font-medium text-gray-700 hover:bg-gray-50 transition">Cancel</button>
+                                <button x-on:click="submitCreate()" :disabled="busy"
+                                    :class="busy ? 'opacity-50 pointer-events-none' : 'hover:bg-indigo-700'"
+                                    class="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium transition">Create Bot</button>
+                            </div>
+                        </div>
+                    </template>
+                    <template x-if="createdKey">
+                        <div class="text-center py-2">
+                            <svg class="w-14 h-14 mx-auto text-green-500 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                            <h3 class="text-lg font-semibold text-gray-900 mb-1">Bot created</h3>
+                            <p class="text-sm text-gray-500 mb-4">Copy the API key now — it is shown only once and cannot be retrieved later.</p>
+                            <div class="flex items-center gap-2 bg-gray-100 rounded-lg p-3 mb-4">
+                                <code class="flex-1 text-left text-xs font-mono text-gray-800 break-all" x-text="createdKey.full_key"></code>
+                                <button x-on:click="copyKey()"
+                                    class="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium text-indigo-600 hover:bg-indigo-50 transition">
+                                    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"/></svg>
+                                    Copy
+                                </button>
+                            </div>
+                            <button x-on:click="closeModals()" class="px-4 py-2 rounded-lg border border-gray-200 text-sm font-medium text-gray-700 hover:bg-gray-50 transition">Done</button>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <!-- EDIT MODAL -->
+            <div x-show="(isAdmin || canManage) && showEditId" x-cloak class="fixed inset-0 z-50 flex items-center justify-center p-4" style="display:none;">
+                <div class="fixed inset-0 bg-black/40" x-on:click="closeModals()"></div>
+                <div class="relative bg-white rounded-xl shadow-xl border border-gray-200 w-full max-w-lg max-h-[90vh] overflow-y-auto p-6">
+                    <h3 class="text-lg font-semibold text-gray-900 mb-1">Edit Bot</h3>
+                    <p class="text-sm text-gray-500 mb-5" x-text="editing ? editing.name : ''"></p>
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                            <input type="text" x-model="form.name" maxlength="100"
+                                class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Permissions</label>
+                            <div class="grid grid-cols-2 gap-2">
+                                <template x-for="p in ['can_upload','can_download','can_copy','can_edit','can_delete','can_list']" :key="p">
+                                    <label class="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                                        <input type="checkbox" :checked="form[p]" x-on:change="form[p] = !form[p]" class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
+                                        <span x-text="p.replace('can_', '')"></span>
+                                    </label>
+                                </template>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Path rules</label>
+                            <p class="text-xs text-gray-400 mb-2">A bucket with no rule is fully accessible. Empty path = the whole bucket. Block rules always override allow rules.</p>
+                            <div class="border border-gray-200 rounded-lg overflow-hidden">
+                                <table class="w-full text-sm">
+                                    <thead>
+                                        <tr class="bg-gray-100 text-left text-xs text-gray-500">
+                                            <th class="px-3 py-2">Bucket</th>
+                                            <th class="px-3 py-2">Path</th>
+                                            <th class="px-3 py-2">Status</th>
+                                            <th class="px-2 py-2 w-8"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <template x-for="(rule, i) in form.path_rules" :key="i">
+                                            <tr>
+                                                <td class="px-3 py-2 align-top">
+                                                    <select x-model="rule.bucket"
+                                                        class="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition">
+                                                        <template x-for="b in buckets" :key="b.name">
+                                                            <option :value="b.name" x-text="b.name"></option>
+                                                        </template>
+                                                    </select>
+                                                </td>
+                                                <td class="px-3 py-2 align-top">
+                                                    <input type="text" x-model="rule.path" placeholder="/folder/subfolder or empty"
+                                                        class="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition">
+                                                </td>
+                                                <td class="px-3 py-2 align-top">
+                                                    <select x-model="rule.status"
+                                                        class="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition">
+                                                        <option value="allow">allow</option>
+                                                        <option value="block">block</option>
+                                                    </select>
+                                                </td>
+                                                <td class="px-2 py-2 align-top text-right">
+                                                    <button x-on:click="removeRule(i)" title="Remove rule"
+                                                        class="text-red-500 hover:text-red-700 transition">✕</button>
+                                                </td>
+                                            </tr>
+                                        </template>
+                                        <tr x-show="form.path_rules.length === 0">
+                                            <td colspan="4" class="px-3 py-3 text-xs text-gray-400">No rules — the bot can access every bucket the owner can reach.</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <button x-on:click="addRule()" class="mt-2 text-sm font-medium text-indigo-600 hover:text-indigo-700 transition">+ Add rule</button>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Upload limit (bytes)</label>
+                            <input type="number" min="0" x-model="form.upload_limit_bytes"
+                                class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 transition">
+                            <p class="text-xs text-gray-400 mt-1">0 = unlimited</p>
+                        </div>
+                        <p x-show="formError" class="text-sm text-red-600" x-text="formError"></p>
+                    </div>
+                    <div class="flex items-center justify-end gap-2 mt-6">
+                        <button x-on:click="closeModals()" class="px-4 py-2 rounded-lg border border-gray-200 text-sm font-medium text-gray-700 hover:bg-gray-50 transition">Cancel</button>
+                        <button x-on:click="submitEdit()" :disabled="busy"
+                            :class="busy ? 'opacity-50 pointer-events-none' : 'hover:bg-indigo-700'"
+                            class="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium transition">Save Changes</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

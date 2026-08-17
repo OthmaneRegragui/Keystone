@@ -63,7 +63,6 @@ pub struct DashboardStatsDto {
     pub total_files: i64,
     pub storage_used: i64,
     pub duplicates_saved: i64,
-    pub api_key_count: i64,
     pub quota_bytes: i64,
     pub recent_files: Vec<FileDto>,
 }

@@ -24,13 +24,14 @@ use keystone::storage::local::LocalFsBackend;
 
 const DASHBOARD_HTML: &str = include_str!("static/dashboard.html");
 const FILES_HTML: &str = include_str!("static/files.html");
-const API_KEYS_HTML: &str = include_str!("static/api-keys.html");
 const ACCOUNT_HTML: &str = include_str!("static/account.html");
 const ADMIN_HTML: &str = include_str!("static/admin.html");
 const LOGIN_HTML: &str = include_str!("static/login.html");
 const REGISTER_HTML: &str = include_str!("static/register.html");
 const SETUP_HTML: &str = include_str!("static/setup.html");
 const DOCS_HTML: &str = include_str!("static/docs.html");
+const ORPHANS_HTML: &str = include_str!("static/orphans.html");
+const BOTS_HTML: &str = include_str!("static/bots.html");
 
 // Vendored assets (self-hosted so the UI works fully offline — no CDN).
 const ALPINE_JS: &str = include_str!("static/vendor/alpine.min.js");
@@ -293,36 +294,11 @@ async fn ui_handler(
             match path {
                 "/" | "/dashboard" => HtmlResponse(versioned(DASHBOARD_HTML)).into_response(),
                 "/files" => HtmlResponse(versioned(FILES_HTML)).into_response(),
-                "/api-keys" => HtmlResponse(versioned(API_KEYS_HTML)).into_response(),
                 "/account" => HtmlResponse(versioned(ACCOUNT_HTML)).into_response(),
                 "/admin" => HtmlResponse(versioned(ADMIN_HTML)).into_response(),
-                "/docs" => {
-                    // /docs is admin-only. The UI authenticates via the
-                    // Authorization header (JWT stored in localStorage), so we
-                    // can only enforce this when the header is present; plain
-                    // browser navigation relies on the client-side guard in
-                    // docs.html.
-                    if let Some(auth) = headers
-                        .get(header::AUTHORIZATION)
-                        .and_then(|v| v.to_str().ok())
-                    {
-                        let (scheme, token) = auth.split_once(' ').unwrap_or(("", auth));
-                        if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() {
-                            return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
-                        }
-                        match state.jwt_service.validate_token(token) {
-                            Ok(claims) => {
-                                if claims.role != "admin" {
-                                    return (StatusCode::FORBIDDEN, "Forbidden").into_response();
-                                }
-                            }
-                            Err(_) => {
-                                return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
-                            }
-                        }
-                    }
-                    HtmlResponse(versioned(DOCS_HTML)).into_response()
-                }
+                "/docs" => admin_page(headers, &state, DOCS_HTML).await,
+                "/orphans" => admin_page(headers, &state, ORPHANS_HTML).await,
+                "/bots" => HtmlResponse(versioned(BOTS_HTML)).into_response(),
                 _ => (StatusCode::NOT_FOUND, "Not Found").into_response(),
             }
         }
@@ -330,6 +306,35 @@ async fn ui_handler(
 }
 
 struct HtmlResponse(String);
+
+/// Serve an admin-only page. The UI authenticates via the Authorization
+/// header (JWT stored in localStorage), so we can only enforce this when the
+/// header is present; plain browser navigation relies on the client-side
+/// role guard in each page.
+async fn admin_page(
+    headers: axum::http::HeaderMap,
+    state: &Arc<AppState>,
+    html: &'static str,
+) -> Response {
+    if let Some(auth) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
+        let (scheme, token) = auth.split_once(' ').unwrap_or(("", auth));
+        if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() {
+            return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+        }
+        match state.jwt_service.validate_token(token) {
+            Ok(claims) => {
+                if claims.role != "admin" {
+                    return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+                }
+            }
+            Err(_) => return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
+        }
+    }
+    HtmlResponse(versioned(html)).into_response()
+}
 
 fn versioned(html: &'static str) -> String {
     html.replace("__KEYSTONE_VERSION__", KEYSTONE_VERSION)

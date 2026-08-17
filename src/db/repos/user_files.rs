@@ -1,6 +1,6 @@
 use chrono::Utc;
 use crate::error::{AppError, AppResult};
-use crate::models::UserFile;
+use crate::models::{Bot, BotPathRule, BotRuleStatus, UserFile};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
@@ -40,6 +40,97 @@ impl UserFileWithMetaRow {
     }
 }
 
+/// Escape `LIKE` wildcards so rule paths match literally under `ESCAPE '\'`.
+fn like_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '%' => out.push_str("\\%"),
+            '_' => out.push_str("\\_"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The buckets that appear in a rule list, in first-appearance order.
+fn distinct_buckets(rules: &[BotPathRule]) -> Vec<&str> {
+    let mut seen: Vec<&str> = Vec::new();
+    for r in rules {
+        if !seen.contains(&r.bucket.as_str()) {
+            seen.push(&r.bucket);
+        }
+    }
+    seen
+}
+
+/// Build a SQL condition (plus its bound values) that restricts the `file_rows`
+/// derived table to the files the bot's path rules allow.
+///
+/// Per bucket the semantics match [`Bot::path_allowed`]:
+///   - a bucket with no rules is fully accessible;
+///   - a bucket with rules is fail-closed: an allow rule must cover the file's
+///     path and no block rule may cover it (block wins);
+///   - private files (NULL bucket) always pass.
+///
+/// `file_path` is the folder path + original name computed by the recursive CTE
+/// in the enclosing query. Returns `None` when the bot carries no rules.
+fn bot_path_filter(bot: &Bot, param_idx: &mut usize, binds: &mut Vec<String>) -> Option<String> {
+    let rules = bot.path_rules.as_ref()?;
+    if rules.is_empty() {
+        return None;
+    }
+
+    let mut bucket_conds = Vec::new();
+    for bucket in distinct_buckets(rules) {
+        let mut allows: Vec<String> = Vec::new();
+        let mut blocks: Vec<String> = Vec::new();
+
+        for r in rules.iter().filter(|r| r.bucket == bucket) {
+            let path = r.path.trim_end_matches('/').to_string();
+            let path_idx = *param_idx;
+            *param_idx += 1;
+            let like_idx = *param_idx;
+            *param_idx += 1;
+            let like_pat = format!("{}/%", like_escape(&path));
+            let cond = format!(
+                "(${path_idx} = '' OR file_path = ${path_idx} OR file_path LIKE ${like_idx} ESCAPE '\\')"
+            );
+            binds.push(path);
+            binds.push(like_pat);
+            if r.status == BotRuleStatus::Allow {
+                allows.push(cond);
+            } else {
+                blocks.push(cond);
+            }
+        }
+
+        let bucket_idx = *param_idx;
+        *param_idx += 1;
+        binds.push(bucket.to_string());
+
+        let allow_clause = if allows.is_empty() {
+            "FALSE".to_string()
+        } else {
+            format!("({})", allows.join(" OR "))
+        };
+        let block_clause = if blocks.is_empty() {
+            "TRUE".to_string()
+        } else {
+            format!("NOT ({})", blocks.join(" OR "))
+        };
+        bucket_conds.push(format!(
+            "(bucket_name = ${bucket_idx} AND {allow_clause} AND {block_clause})"
+        ));
+    }
+
+    Some(format!(
+        "(bucket_name IS NULL OR {})",
+        bucket_conds.join(" OR ")
+    ))
+}
+
 /// Flat row for admin exports: user_file + file + user info.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct UserFileExportRow {
@@ -54,6 +145,21 @@ pub struct UserFileExportRow {
     pub folder_id: Option<String>,
     pub blake3_hash: String,
     pub size: i64,
+}
+
+/// Flat row for the admin orphaned-files view: a physical file with no
+/// remaining active references, annotated with its most recent soft-deleted
+/// reference (name, bucket, owner, when it became unreachable).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct OrphanedFileRow {
+    pub file_id: String,
+    pub blake3_hash: String,
+    pub original_name: String,
+    pub size: i64,
+    pub created_at: String,
+    pub bucket_name: Option<String>,
+    pub deleted_at: Option<String>,
+    pub username: Option<String>,
 }
 
 pub struct UserFileRepository;
@@ -181,6 +287,10 @@ impl UserFileRepository {
 
     /// List all user_files for a specific user, with pagination, search, bucket filter, and folder filter.
     /// Joins with the files table to get size, hash, and ref_count.
+    ///
+    /// Bot path rules are enforced via a derived `file_path` column (folder
+    /// path + original name, computed by a recursive CTE over `user_folders`)
+    /// so listing/counting stay accurate under pagination.
     pub async fn list_by_user(
         pool: &PgPool,
         user_id: Uuid,
@@ -189,17 +299,18 @@ impl UserFileRepository {
         search: Option<&str>,
         bucket: Option<&str>,
         folder_id: Option<Uuid>,
+        bot: Option<&crate::models::Bot>,
     ) -> AppResult<Vec<(UserFile, String, i64, i32)>> {
         // Returns (user_file, blake3_hash, size, ref_count)
         let user_id_str = user_id.to_string();
         let folder_str = folder_id.map(|f| f.to_string());
 
-        let mut where_clauses = vec!["uf.user_id = $1".to_string(), "uf.deleted_at IS NULL".to_string()];
+        let mut where_clauses: Vec<String> = Vec::new();
         let mut bind_values: Vec<String> = vec![user_id_str.clone()];
         let mut param_idx = 2;
 
         if let Some(b) = bucket {
-            where_clauses.push(format!("uf.bucket_name = ${param_idx}"));
+            where_clauses.push(format!("bucket_name = ${param_idx}"));
             bind_values.push(b.to_string());
             param_idx += 1;
         }
@@ -207,31 +318,65 @@ impl UserFileRepository {
         match folder_str.as_deref() {
             Some(fid) if !fid.is_empty() => {
                 // Specific folder: show files in that folder
-                where_clauses.push(format!("uf.folder_id = ${param_idx}"));
+                where_clauses.push(format!("folder_id = ${param_idx}"));
                 bind_values.push(fid.to_string());
                 param_idx += 1;
             }
             _ => {
                 // Root (no folder_id provided): only show root-level files
-                where_clauses.push("uf.folder_id IS NULL".to_string());
+                where_clauses.push("folder_id IS NULL".to_string());
+            }
+        }
+
+        // Narrow the query to the bot's path rules (see `bot_path_filter`).
+        // Private files without a bucket always pass, mirroring the old
+        // bucket allow-list behaviour.
+        if let Some(bot) = bot {
+            if let Some(cond) = bot_path_filter(bot, &mut param_idx, &mut bind_values) {
+                where_clauses.push(cond);
             }
         }
 
         if let Some(s) = search {
             let pattern = format!("%{s}%");
-            where_clauses.push(format!("(uf.original_name ILIKE ${param_idx} OR f.blake3_hash ILIKE ${param_idx})"));
+            where_clauses.push(format!("(original_name ILIKE ${param_idx} OR blake3_hash ILIKE ${param_idx})"));
             bind_values.push(pattern);
             param_idx += 1;
         }
 
+        let where_clause = if where_clauses.is_empty() {
+            "TRUE".to_string()
+        } else {
+            where_clauses.join(" AND ")
+        };
+
         let sql = format!(
-            r#"SELECT uf.*, f.blake3_hash, f.size, f.ref_count
-               FROM user_files uf
-               JOIN files f ON uf.file_id = f.id
+            r#"WITH RECURSIVE folder_paths AS (
+                   SELECT id, user_id, bucket_name, parent_id, name, name AS rel
+                   FROM user_folders
+                   WHERE parent_id IS NULL AND user_id = $1
+                   UNION ALL
+                   SELECT f.id, f.user_id, f.bucket_name, f.parent_id, f.name,
+                          fp.rel || '/' || f.name
+                   FROM user_folders f
+                   JOIN folder_paths fp ON f.parent_id = fp.id
+               ),
+               file_rows AS (
+                   SELECT uf.*, f.blake3_hash, f.size, f.ref_count,
+                          CASE WHEN fp.rel IS NULL THEN '/' || uf.original_name
+                               ELSE '/' || fp.rel || '/' || uf.original_name END AS file_path
+                   FROM user_files uf
+                   JOIN files f ON uf.file_id = f.id
+                   LEFT JOIN folder_paths fp ON fp.id = uf.folder_id
+                   WHERE uf.user_id = $1 AND uf.deleted_at IS NULL
+               )
+               SELECT id, user_id, file_id, original_name, mime_type, created_at,
+                      bucket_name, folder_id, deleted_at, blake3_hash, size, ref_count
+               FROM file_rows
                WHERE {where_clause}
-               ORDER BY uf.created_at DESC
+               ORDER BY created_at DESC
                LIMIT ${param_idx} OFFSET ${param_idx_plus_one}"#,
-            where_clause = where_clauses.join(" AND "),
+            where_clause = where_clause,
             param_idx = param_idx,
             param_idx_plus_one = param_idx + 1,
         );
@@ -257,43 +402,74 @@ impl UserFileRepository {
         search: Option<&str>,
         bucket: Option<&str>,
         folder_id: Option<Uuid>,
+        bot: Option<&crate::models::Bot>,
     ) -> AppResult<i64> {
         let user_id_str = user_id.to_string();
         let folder_str = folder_id.map(|f| f.to_string());
 
-        let mut where_clauses = vec!["uf.user_id = $1".to_string(), "uf.deleted_at IS NULL".to_string()];
+        let mut where_clauses: Vec<String> = Vec::new();
         let mut bind_values: Vec<String> = vec![user_id_str.clone()];
         let mut param_idx = 2;
 
         if let Some(b) = bucket {
-            where_clauses.push(format!("uf.bucket_name = ${param_idx}"));
+            where_clauses.push(format!("bucket_name = ${param_idx}"));
             bind_values.push(b.to_string());
             param_idx += 1;
         }
 
         match folder_str.as_deref() {
             Some(fid) if !fid.is_empty() => {
-                where_clauses.push(format!("uf.folder_id = ${param_idx}"));
+                where_clauses.push(format!("folder_id = ${param_idx}"));
                 bind_values.push(fid.to_string());
                 param_idx += 1;
             }
             _ => {
-                where_clauses.push("uf.folder_id IS NULL".to_string());
+                where_clauses.push("folder_id IS NULL".to_string());
+            }
+        }
+
+        if let Some(bot) = bot {
+            if let Some(cond) = bot_path_filter(bot, &mut param_idx, &mut bind_values) {
+                where_clauses.push(cond);
             }
         }
 
         if let Some(s) = search {
             let pattern = format!("%{s}%");
-            where_clauses.push(format!("(uf.original_name ILIKE ${param_idx} OR f.blake3_hash ILIKE ${param_idx})"));
+            where_clauses.push(format!("(original_name ILIKE ${param_idx} OR blake3_hash ILIKE ${param_idx})"));
             bind_values.push(pattern);
         }
 
+        let where_clause = if where_clauses.is_empty() {
+            "TRUE".to_string()
+        } else {
+            where_clauses.join(" AND ")
+        };
+
         let sql = format!(
-            r#"SELECT COUNT(*)
-               FROM user_files uf
-               JOIN files f ON uf.file_id = f.id
+            r#"WITH RECURSIVE folder_paths AS (
+                   SELECT id, user_id, bucket_name, parent_id, name, name AS rel
+                   FROM user_folders
+                   WHERE parent_id IS NULL AND user_id = $1
+                   UNION ALL
+                   SELECT f.id, f.user_id, f.bucket_name, f.parent_id, f.name,
+                          fp.rel || '/' || f.name
+                   FROM user_folders f
+                   JOIN folder_paths fp ON f.parent_id = fp.id
+               ),
+               file_rows AS (
+                   SELECT uf.*, f.blake3_hash, f.size, f.ref_count,
+                          CASE WHEN fp.rel IS NULL THEN '/' || uf.original_name
+                               ELSE '/' || fp.rel || '/' || uf.original_name END AS file_path
+                   FROM user_files uf
+                   JOIN files f ON uf.file_id = f.id
+                   LEFT JOIN folder_paths fp ON fp.id = uf.folder_id
+                   WHERE uf.user_id = $1 AND uf.deleted_at IS NULL
+               )
+               SELECT COUNT(*)
+               FROM file_rows
                WHERE {where_clause}"#,
-            where_clause = where_clauses.join(" AND "),
+            where_clause = where_clause,
         );
 
         let mut query = sqlx::query_as::<_, (i64,)>(&sql);
@@ -625,6 +801,116 @@ impl UserFileRepository {
         .fetch_all(pool)
         .await
         .map_err(|e| AppError::Internal(format!("failed to get orphaned stats per bucket: {e}")))?;
+
+        Ok(rows)
+    }
+
+    /// Total count and combined size of orphaned physical files (admin detail view).
+    /// Same definition as `orphaned_physical_files_global`: a physical file whose
+    /// EVERY user_files reference is soft-deleted.
+    pub async fn orphaned_files_total(pool: &PgPool) -> AppResult<(i64, i64)> {
+        let row: (i64, i64) = sqlx::query_as(
+            r#"SELECT COUNT(DISTINCT f.id), COALESCE(SUM(DISTINCT f.size), 0)::BIGINT
+               FROM files f
+               WHERE EXISTS (
+                   SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NOT NULL
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NULL
+               )"#,
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to count orphaned files: {e}")))?;
+
+        Ok(row)
+    }
+
+    /// All physical file ids that are orphaned (every user_files reference
+    /// soft-deleted). Used by the admin "delete all" action.
+    pub async fn orphaned_file_ids(pool: &PgPool) -> AppResult<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            r#"SELECT DISTINCT f.id
+               FROM files f
+               WHERE EXISTS (
+                   SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NOT NULL
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NULL
+               )"#,
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to list orphaned file ids: {e}")))?;
+
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
+    /// Whether a physical file is orphaned: it exists, has at least one
+    /// soft-deleted reference and NO active reference.
+    pub async fn is_orphaned_file(pool: &PgPool, file_id: Uuid) -> AppResult<bool> {
+        let row: (bool, bool) = sqlx::query_as(
+            r#"SELECT EXISTS (
+                   SELECT 1 FROM user_files uf WHERE uf.file_id = $1 AND uf.deleted_at IS NULL
+               ),
+               EXISTS (
+                   SELECT 1 FROM user_files uf WHERE uf.file_id = $1 AND uf.deleted_at IS NOT NULL
+               )"#,
+        )
+        .bind(file_id.to_string())
+        .fetch_one(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to check orphaned status: {e}")))?;
+
+        Ok(!row.0 && row.1)
+    }
+
+    /// Hard-delete every user_files row referencing a file (used when purging
+    /// an orphaned physical file; all such references are already soft-deleted).
+    pub async fn delete_by_file(pool: &PgPool, file_id: Uuid) -> AppResult<()> {
+        sqlx::query("DELETE FROM user_files WHERE file_id = $1")
+            .bind(file_id.to_string())
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to delete user_files rows: {e}")))?;
+
+        Ok(())
+    }
+
+    /// One page of orphaned physical files for the admin UI. For each file the
+    /// most recently deleted reference is used to show name, bucket, owner and
+    /// when it became unreachable.
+    pub async fn orphaned_files_page(
+        pool: &PgPool,
+        limit: i64,
+        offset: i64,
+    ) -> AppResult<Vec<OrphanedFileRow>> {
+        let rows = sqlx::query_as::<_, OrphanedFileRow>(
+            r#"SELECT f.id AS file_id, f.blake3_hash, last_ref.original_name, f.size,
+                      f.created_at, last_ref.bucket_name, last_ref.deleted_at, u.username
+               FROM files f
+               JOIN LATERAL (
+                   SELECT uf.original_name, uf.bucket_name, uf.deleted_at, uf.user_id
+                   FROM user_files uf
+                   WHERE uf.file_id = f.id AND uf.deleted_at IS NOT NULL
+                   ORDER BY uf.deleted_at DESC
+                   LIMIT 1
+               ) last_ref ON true
+               LEFT JOIN users u ON u.id = last_ref.user_id
+               WHERE EXISTS (
+                   SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NOT NULL
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NULL
+               )
+               ORDER BY last_ref.deleted_at DESC
+               LIMIT $1 OFFSET $2"#,
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to list orphaned files: {e}")))?;
 
         Ok(rows)
     }

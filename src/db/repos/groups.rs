@@ -30,19 +30,20 @@ impl GroupRepository {
             created_at: Utc::now(),
             allow_api_keys: false,
             allow_password_change: false,
+            allow_bots: false,
         })
     }
 
     pub async fn list(pool: &PgPool) -> AppResult<Vec<UserGroup>> {
-        let rows: Vec<(String, String, String, bool, bool)> =
-            sqlx::query_as("SELECT id, name, created_at, allow_api_keys, allow_password_change FROM user_groups ORDER BY name ASC")
+        let rows: Vec<(String, String, String, bool, bool, bool)> =
+            sqlx::query_as("SELECT id, name, created_at, allow_api_keys, allow_password_change, allow_bots FROM user_groups ORDER BY name ASC")
                 .fetch_all(pool)
                 .await
                 .map_err(|e| AppError::Internal(format!("failed to list groups: {e}")))?;
 
         Ok(rows
             .into_iter()
-            .map(|(id, name, created_at, allow_api_keys, allow_password_change)| UserGroup {
+            .map(|(id, name, created_at, allow_api_keys, allow_password_change, allow_bots)| UserGroup {
                 id,
                 name,
                 created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
@@ -50,6 +51,7 @@ impl GroupRepository {
                     .with_timezone(&Utc),
                 allow_api_keys,
                 allow_password_change,
+                allow_bots,
             })
             .collect())
     }
@@ -261,14 +263,14 @@ impl GroupRepository {
     }
 
     pub async fn get_by_id(pool: &PgPool, id: &str) -> AppResult<Option<UserGroup>> {
-        let row: Option<(String, String, String, bool, bool)> =
-            sqlx::query_as("SELECT id, name, created_at, allow_api_keys, allow_password_change FROM user_groups WHERE id = $1")
+        let row: Option<(String, String, String, bool, bool, bool)> =
+            sqlx::query_as("SELECT id, name, created_at, allow_api_keys, allow_password_change, allow_bots FROM user_groups WHERE id = $1")
                 .bind(id)
                 .fetch_optional(pool)
                 .await
                 .map_err(|e| AppError::Internal(format!("failed to get group: {e}")))?;
 
-        Ok(row.map(|(id, name, created_at, allow_api_keys, allow_password_change)| UserGroup {
+        Ok(row.map(|(id, name, created_at, allow_api_keys, allow_password_change, allow_bots)| UserGroup {
             id,
             name,
             created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
@@ -276,6 +278,7 @@ impl GroupRepository {
                 .with_timezone(&Utc),
             allow_api_keys,
             allow_password_change,
+            allow_bots,
         }))
     }
 
@@ -284,12 +287,14 @@ impl GroupRepository {
         id: &str,
         allow_api_keys: bool,
         allow_password_change: bool,
+        allow_bots: bool,
     ) -> AppResult<bool> {
         let affected = sqlx::query(
-            "UPDATE user_groups SET allow_api_keys = $1, allow_password_change = $2 WHERE id = $3",
+            "UPDATE user_groups SET allow_api_keys = $1, allow_password_change = $2, allow_bots = $3 WHERE id = $4",
         )
         .bind(allow_api_keys)
         .bind(allow_password_change)
+        .bind(allow_bots)
         .bind(id)
         .execute(pool)
         .await
@@ -333,6 +338,25 @@ impl GroupRepository {
         .fetch_one(pool)
         .await
         .map_err(|e| AppError::Internal(format!("failed to check password change group permission: {e}")))?;
+        Ok(exists)
+    }
+
+    /// Whether the user is a member of at least one group with `allow_bots`
+    /// enabled. Same ANY-group-allow semantics as
+    /// [`GroupRepository::user_allows_api_keys`].
+    pub async fn user_allows_bots(pool: &PgPool, user_id: &str) -> AppResult<bool> {
+        let (exists,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM group_members gm
+                JOIN user_groups g ON g.id = gm.group_id
+                WHERE gm.user_id = $1 AND g.allow_bots
+            )",
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to check bots group permission: {e}")))?;
         Ok(exists)
     }
 }

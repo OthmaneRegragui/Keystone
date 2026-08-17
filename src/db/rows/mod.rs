@@ -1,4 +1,5 @@
 pub mod api_key_row;
+pub mod bot_row;
 pub mod file_row;
 pub mod folder_row;
 pub mod storage_object_row;
@@ -6,6 +7,7 @@ pub mod user_row;
 pub mod user_file_row;
 
 pub use api_key_row::{ApiKeyRow, CreateApiKeyData};
+pub use bot_row::{bot_columns_serialized, BotRow, CreateBotData};
 pub use file_row::{FileRecord, FileRow};
 pub use folder_row::{FolderRecord, FolderRow};
 pub use storage_object_row::{CreateStorageObjectData, StorageObjectRow};

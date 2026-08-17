@@ -4,7 +4,7 @@ use axum::extract::State;
 use axum::Json;
 
 use crate::api::extractors::AuthUser;
-use crate::db::repos::{ApiKeyRepository, UserFileRepository, UserRepository};
+use crate::db::repos::{UserFileRepository, UserRepository};
 use crate::dto::*;
 use crate::error::AppResult;
 use crate::AppState;
@@ -19,8 +19,6 @@ pub async fn stats(
 
     let (total_files, storage_used, duplicates_saved) =
         UserFileRepository::summarize_by_user(state.db.pool(), auth.user_id).await?;
-
-    let api_key_count = ApiKeyRepository::count_active_by_user(state.db.pool(), auth.user_id).await?;
 
     let quota_bytes = UserRepository::find_by_id(state.db.pool(), auth.user_id)
         .await?
@@ -48,7 +46,6 @@ pub async fn stats(
         total_files,
         storage_used,
         duplicates_saved,
-        api_key_count,
         quota_bytes,
         recent_files,
     }))

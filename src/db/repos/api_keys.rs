@@ -71,19 +71,6 @@ impl ApiKeyRepository {
         Ok(rows.into_iter().map(ApiKey::from).collect())
     }
 
-    /// Count of the user's active (non-revoked) API keys.
-    pub async fn count_active_by_user(pool: &PgPool, user_id: Uuid) -> AppResult<i64> {
-        let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM api_keys WHERE user_id = $1 AND is_active = TRUE",
-        )
-        .bind(user_id.to_string())
-        .fetch_one(pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("failed to count user api keys: {e}")))?;
-
-        Ok(row.0)
-    }
-
     pub async fn list_bot_keys(pool: &PgPool) -> AppResult<Vec<ApiKey>> {
         let rows = sqlx::query_as::<_, ApiKeyRow>(
             "SELECT * FROM api_keys WHERE user_id IS NULL ORDER BY created_at DESC",
@@ -103,6 +90,25 @@ impl ApiKeyRepository {
             .execute(pool)
             .await
             .map_err(|e| AppError::Internal(format!("failed to update api key last used: {e}")))?
+            .rows_affected();
+
+        if affected == 0 {
+            return Err(AppError::NotFound(format!("api key {id} not found")));
+        }
+        Ok(())
+    }
+
+    /// Replace the key's scopes. Used when a bot's capabilities change so the
+    /// underlying key stays in sync with the bot's granted flags.
+    pub async fn update_scopes(pool: &PgPool, id: Uuid, scopes: &[String]) -> AppResult<()> {
+        let scopes_json =
+            serde_json::to_string(scopes).unwrap_or_else(|_| "[]".to_string());
+        let affected = sqlx::query("UPDATE api_keys SET scopes = $1 WHERE id = $2")
+            .bind(&scopes_json)
+            .bind(id.to_string())
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to update api key scopes: {e}")))?
             .rows_affected();
 
         if affected == 0 {

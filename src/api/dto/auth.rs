@@ -53,10 +53,34 @@ pub struct ChangePasswordRequest {
     pub new_password: String,
 }
 
+/// A user creating an API key for their own account (the account page).
+#[derive(Debug, Deserialize)]
+pub struct CreateUserApiKeyRequest {
+    pub name: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    pub expires_in_days: Option<u32>,
+}
+
+/// One of the caller's own API keys. Excludes the key hash and the owner id
+/// (implicit); includes everything the account page needs to render it.
+#[derive(Debug, Serialize)]
+pub struct UserApiKeyDto {
+    pub id: String,
+    pub name: String,
+    pub prefix: String,
+    pub scopes: Vec<String>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub is_active: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct AccountPermissionsDto {
     pub allow_api_keys: bool,
     pub allow_password_change: bool,
+    pub allow_bots: bool,
 }
 
 #[derive(Debug, Serialize)]

@@ -61,10 +61,12 @@ impl AdminSettingRepository {
     pub async fn get_platform_settings(pool: &PgPool) -> AppResult<crate::models::PlatformSettings> {
         let block_reg = Self::get_bool(pool, "block_registrations").await?;
         let allow_user_api_keys = Self::get_bool(pool, "allow_user_api_keys").await?;
+        let allow_user_bots = Self::get_bool(pool, "allow_user_bots").await?;
         let allow_user_password_change = Self::get_bool(pool, "allow_user_password_change").await?;
         Ok(crate::models::PlatformSettings {
             block_registrations: block_reg,
             allow_user_api_keys,
+            allow_user_bots,
             allow_user_password_change,
         })
     }

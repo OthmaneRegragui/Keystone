@@ -155,33 +155,63 @@ impl FolderRepository {
             return Ok(false);
         }
 
-        // 2. Soft-delete ALL files in those folders (set deleted_at = now)
+        // 2. Soft-delete ALL files in those folders (set deleted_at = now), then
+        // hard-delete the folders themselves. Both run in one transaction so a
+        // mid-way failure cannot leave files soft-deleted but folders kept (or
+        // the reverse).
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to begin folder delete: {e}")))?;
+
         let now = chrono::Utc::now().to_rfc3339();
         let folder_id_strs: Vec<String> = all_folder_ids.iter().map(|(id,)| id.clone()).collect();
-        let placeholders: Vec<String> = folder_id_strs.iter().enumerate().map(|(i, _)| format!("${}", i + 1)).collect();
-        let sql = format!(
+
+        // The file soft-delete binds `now` as $1, so the folder ids must occupy
+        // $2..$N (a placeholder list starting at $1 would compare `folder_id`
+        // against the timestamp and silently drop the last folder id).
+        let file_placeholders: Vec<String> = folder_id_strs
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("${}", i + 2))
+            .collect();
+        let file_sql = format!(
             "UPDATE user_files SET deleted_at = $1 WHERE folder_id IN ({}) AND deleted_at IS NULL",
-            placeholders.join(", ")
+            file_placeholders.join(", ")
         );
-        let mut query = sqlx::query(&sql).bind(&now);
+        let mut query = sqlx::query(&file_sql).bind(&now);
         for fid in &folder_id_strs {
             query = query.bind(fid);
         }
-        let _ = query.execute(pool).await
+        let _ = query
+            .execute(&mut *tx)
+            .await
             .map_err(|e| AppError::Internal(format!("failed to soft-delete files in folder tree: {e}")))?;
 
-        // 3. Hard-delete all folders in the tree (deepest first via the CTE)
+        // 3. Hard-delete all folders in the tree (deepest first via the CTE).
+        // No `now` bound here, so the ids start at $1.
+        let folder_placeholders: Vec<String> = folder_id_strs
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("${}", i + 1))
+            .collect();
         let del_query = format!(
             "DELETE FROM user_folders WHERE id IN ({})",
-            placeholders.join(", ")
+            folder_placeholders.join(", ")
         );
         let mut query = sqlx::query(&del_query);
         for fid in &folder_id_strs {
             query = query.bind(fid);
         }
-        let affected = query.execute(pool).await
+        let affected = query
+            .execute(&mut *tx)
+            .await
             .map_err(|e| AppError::Internal(format!("failed to delete folder tree: {e}")))?
             .rows_affected();
+
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to commit folder delete: {e}")))?;
 
         Ok(affected > 0)
     }

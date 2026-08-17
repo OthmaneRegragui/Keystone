@@ -29,7 +29,7 @@ async fn create_test_user(db: &Database) -> CreateUserData {
 
 #[tokio::test]
 async fn test_create_user() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let data = create_test_user(&db).await;
 
     let user = UserRepository::find_by_username(db.pool(), &data.username)
@@ -49,7 +49,7 @@ async fn test_create_user() {
 
 #[tokio::test]
 async fn test_create_admin_user() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let username = format!("admin_{}", &Uuid::new_v4().to_string()[..8]);
     let email = format!("admin_{}@test.com", &Uuid::new_v4().to_string()[..8]);
 
@@ -77,7 +77,7 @@ async fn test_create_admin_user() {
 
 #[tokio::test]
 async fn test_create_duplicate_username() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let data = create_test_user(&db).await;
 
     let result = UserRepository::create(
@@ -97,7 +97,7 @@ async fn test_create_duplicate_username() {
 
 #[tokio::test]
 async fn test_create_duplicate_email() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let data = create_test_user(&db).await;
 
     let result = UserRepository::create(
@@ -117,7 +117,7 @@ async fn test_create_duplicate_email() {
 
 #[tokio::test]
 async fn test_find_by_id() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let data = create_test_user(&db).await;
 
     let user = UserRepository::find_by_username(db.pool(), &data.username)
@@ -141,7 +141,7 @@ async fn test_find_by_id() {
 
 #[tokio::test]
 async fn test_find_by_email() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let data = create_test_user(&db).await;
 
     let found = UserRepository::find_by_email(db.pool(), &data.email)
@@ -159,7 +159,7 @@ async fn test_find_by_email() {
 
 #[tokio::test]
 async fn test_find_by_username() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let data = create_test_user(&db).await;
 
     let found = UserRepository::find_by_username(db.pool(), &data.username)
@@ -201,7 +201,7 @@ async fn test_list_users() {
 
 #[tokio::test]
 async fn test_count_users() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
 
     let count = UserRepository::count(db.pool()).await.unwrap();
     assert_eq!(count, 0);
@@ -216,7 +216,7 @@ async fn test_count_users() {
 
 #[tokio::test]
 async fn test_update_last_login() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let data = create_test_user(&db).await;
 
     let user = UserRepository::find_by_username(db.pool(), &data.username)
@@ -242,7 +242,7 @@ async fn test_update_last_login() {
 
 #[tokio::test]
 async fn test_update_storage_used() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let data = create_test_user(&db).await;
 
     let user = UserRepository::find_by_username(db.pool(), &data.username)
@@ -268,7 +268,7 @@ async fn test_update_storage_used() {
 
 #[tokio::test]
 async fn test_delete_user() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let data = create_test_user(&db).await;
 
     let user = UserRepository::find_by_username(db.pool(), &data.username)
@@ -288,7 +288,7 @@ async fn test_delete_user() {
 
 #[tokio::test]
 async fn test_update_user_email() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let data = create_test_user(&db).await;
 
     let user = UserRepository::find_by_username(db.pool(), &data.username)
@@ -310,7 +310,7 @@ async fn test_update_user_email() {
 
 #[tokio::test]
 async fn test_update_user_role() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let data = create_test_user(&db).await;
 
     let user = UserRepository::find_by_username(db.pool(), &data.username)
@@ -332,7 +332,7 @@ async fn test_update_user_role() {
 
 #[tokio::test]
 async fn test_update_user_password_hash() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let data = create_test_user(&db).await;
 
     let user = UserRepository::find_by_username(db.pool(), &data.username)
@@ -354,7 +354,7 @@ async fn test_update_user_password_hash() {
 
 #[tokio::test]
 async fn test_update_user_not_found() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let nonexistent = Uuid::new_v4();
 
     let result = UserRepository::update_user(db.pool(), nonexistent, Some("a@b.com"), None, None).await;
@@ -363,7 +363,7 @@ async fn test_update_user_not_found() {
 
 #[tokio::test]
 async fn test_update_storage_quota() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let data = create_test_user(&db).await;
 
     let user = UserRepository::find_by_username(db.pool(), &data.username)
@@ -384,7 +384,7 @@ async fn test_update_storage_quota() {
 
 #[tokio::test]
 async fn test_update_storage_quota_not_found() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let nonexistent = Uuid::new_v4();
 
     let result = UserRepository::update_storage_quota(db.pool(), nonexistent, 500).await;
@@ -393,7 +393,7 @@ async fn test_update_storage_quota_not_found() {
 
 #[tokio::test]
 async fn test_update_password_hash_not_found() {
-    let db = helpers::setup_test_db().await;
+    let db = helpers::setup_reset_db().await;
     let nonexistent = Uuid::new_v4();
 
     let result = UserRepository::update_password_hash(db.pool(), nonexistent, "new_hash").await;

@@ -190,7 +190,12 @@
             return {
                 tab: initialTab,
                 stats: { total_users: 0, total_files: 0, total_buckets: 0, total_groups: 0, block_registrations: true, active_user_files: 0, active_user_files_size: 0, deleted_user_files: 0, deleted_user_files_size: 0 },
-                settings: { block_registrations: true, allow_user_api_keys: false, allow_user_password_change: false },
+                orphans: { total: 0, total_size_bytes: 0, files: [] },
+                orphansLoading: false,
+                orphansError: '',
+                bots: [],
+                botsLoading: false,
+                settings: { block_registrations: true, allow_user_api_keys: false, allow_user_bots: false, allow_user_password_change: false },
                 users: [],
                 buckets: [],
                 backends: [],
@@ -246,6 +251,8 @@
                 init: function() {
                     var self = this;
                     self.loadStats();
+                    self.loadOrphans();
+                    self.loadBots();
                     self.loadSettings();
                     self.loadUsers();
                     self.loadBuckets();
@@ -260,6 +267,32 @@
                         .then(function(r) { return r.json(); })
                         .then(function(d) { self.stats = d; })
                         .catch(function() {});
+                },
+                loadOrphans: function() {
+                    var self = this;
+                    self.orphansLoading = true;
+                    self.orphansError = '';
+                    authFetch('/api/admin/orphaned-files?limit=200')
+                        .then(function(r) { return r.json(); })
+                        .then(function(d) {
+                            self.orphans = (d && d.files) ? d : { total: 0, total_size_bytes: 0, files: [] };
+                            self.orphansLoading = false;
+                        })
+                        .catch(function() {
+                            self.orphansLoading = false;
+                            self.orphansError = 'Failed to load orphaned files';
+                        });
+                },
+                loadBots: function() {
+                    var self = this;
+                    self.botsLoading = true;
+                    authFetch('/api/admin/bots')
+                        .then(function(r) { return r.ok ? r.json() : []; })
+                        .then(function(d) {
+                            self.bots = d || [];
+                            self.botsLoading = false;
+                        })
+                        .catch(function() { self.botsLoading = false; });
                 },
                 loadSettings: function() {
                     var self = this;
@@ -363,12 +396,20 @@
                         body: JSON.stringify({ key: 'allow_user_password_change', value: newVal })
                     }).then(function() { self.settings.allow_user_password_change = !self.settings.allow_user_password_change; });
                 },
+                toggleUserBots: function() {
+                    var self = this;
+                    var newVal = self.settings.allow_user_bots ? 'false' : 'true';
+                    authFetch('/api/admin/settings', {
+                        method: 'PUT',
+                        body: JSON.stringify({ key: 'allow_user_bots', value: newVal })
+                    }).then(function() { self.settings.allow_user_bots = !self.settings.allow_user_bots; });
+                },
                 toggleGroupApiKeys: function(g) {
                     var self = this;
                     var newVal = g.allow_api_keys ? false : true;
                     authFetch('/api/admin/groups/permissions', {
                         method: 'PUT',
-                        body: JSON.stringify({ group_id: g.id, allow_api_keys: newVal, allow_password_change: g.allow_password_change })
+                        body: JSON.stringify({ group_id: g.id, allow_api_keys: newVal, allow_password_change: g.allow_password_change, allow_bots: g.allow_bots })
                     }).then(function(r) {
                         if (r.ok) {
                             g.allow_api_keys = newVal;
@@ -381,10 +422,23 @@
                     var newVal = g.allow_password_change ? false : true;
                     authFetch('/api/admin/groups/permissions', {
                         method: 'PUT',
-                        body: JSON.stringify({ group_id: g.id, allow_api_keys: g.allow_api_keys, allow_password_change: newVal })
+                        body: JSON.stringify({ group_id: g.id, allow_api_keys: g.allow_api_keys, allow_password_change: newVal, allow_bots: g.allow_bots })
                     }).then(function(r) {
                         if (r.ok) {
                             g.allow_password_change = newVal;
+                            self.loadGroups();
+                        }
+                    }).catch(function() {});
+                },
+                toggleGroupBots: function(g) {
+                    var self = this;
+                    var newVal = g.allow_bots ? false : true;
+                    authFetch('/api/admin/groups/permissions', {
+                        method: 'PUT',
+                        body: JSON.stringify({ group_id: g.id, allow_api_keys: g.allow_api_keys, allow_password_change: g.allow_password_change, allow_bots: newVal })
+                    }).then(function(r) {
+                        if (r.ok) {
+                            g.allow_bots = newVal;
                             self.loadGroups();
                         }
                     }).catch(function() {});
@@ -890,6 +944,10 @@
                     <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
                     Account
                 </a>
+                    <a href="/bots" :class="active('/bots') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" x-on:click="closeSidebar()" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9z"/></svg>
+                        Bots
+                    </a>
                 <template x-if="user && user.role === 'admin'">
                     <a href="/admin?page=overview" :class="active('/admin') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" x-on:click="closeSidebar()" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
                         <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
@@ -998,6 +1056,36 @@
                             <p class="text-3xl font-bold text-red-600 mt-1" x-text="stats.orphaned_physical_files"></p>
                             <p class="text-sm text-gray-500 mt-1" x-text="fmtBytes(stats.orphaned_physical_files_size) + ' unused'"></p>
                             <p class="text-xs text-red-400 mt-1">No user can access these files</p>
+                        </div>
+                    </div>
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                        <div class="flex flex-wrap items-center justify-between gap-3">
+                            <div>
+                                <h3 class="text-lg font-semibold text-gray-900">Orphaned Files</h3>
+                                <p class="text-sm text-gray-500 mt-0.5" x-text="orphans.total + ' files · ' + fmtBytes(orphans.total_size_bytes) + ' of wasted space'"></p>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <a href="/orphans"
+                                    class="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 transition">
+                                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                                    View All Files
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                        <div class="flex flex-wrap items-center justify-between gap-3">
+                            <div>
+                                <h3 class="text-lg font-semibold text-gray-900">Bots</h3>
+                                <p class="text-sm text-gray-500 mt-0.5" x-text="bots.length + ' bot account(s) with scoped API keys'"></p>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <a href="/bots"
+                                    class="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 transition">
+                                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9z"/></svg>
+                                    Manage Bots
+                                </a>
+                            </div>
                         </div>
                     </div>
                     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
@@ -1620,6 +1708,18 @@
                                         <span :class="currentGroup && currentGroup.allow_password_change ? 'translate-x-4' : 'translate-x-0'" class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
                                     </button>
                                 </div>
+                                <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                                    <div>
+                                        <p class="text-sm font-medium text-gray-900">Allow Bots</p>
+                                        <p class="text-xs text-gray-400">Let members of this group create bot accounts</p>
+                                    </div>
+                                    <button x-on:click="toggleGroupBots(currentGroup)"
+                                        :class="currentGroup && currentGroup.allow_bots ? 'bg-indigo-600' : 'bg-gray-300'"
+                                        class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none"
+                                        :title="currentGroup && currentGroup.allow_bots ? 'Allow Bots' : 'Disallow Bots'">
+                                        <span :class="currentGroup && currentGroup.allow_bots ? 'translate-x-4' : 'translate-x-0'" class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                                    </button>
+                                </div>
                             </div>
                             <div class="px-6 py-4 border-t border-gray-100 flex justify-end">
                                 <button x-on:click="showGroupPermissionsModal = false" class="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition">Close</button>
@@ -1963,6 +2063,25 @@
                                     <td class="px-6 py-4 text-center">
                                         <button x-on:click="toggleUserPasswordChange()" :class="settings.allow_user_password_change ? 'bg-indigo-600' : 'bg-gray-300'" class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none">
                                             <span :class="settings.allow_user_password_change ? 'translate-x-5' : 'translate-x-0'" class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
+                                        </button>
+                                    </td>
+                                </tr>
+                                <!-- Allow User Bots -->
+                                <tr class="hover:bg-gray-50/50 transition">
+                                    <td class="px-6 py-4">
+                                        <div class="flex items-center gap-3">
+                                            <div class="w-8 h-8 rounded-lg bg-purple-100 text-purple-600 flex items-center justify-center shrink-0">
+                                                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 2a2 2 0 00-2 2v1.062A8.005 8.005 0 004 13v2a2 2 0 01-2 2v1h20v-1a2 2 0 01-2-2v-2a8.005 8.005 0 00-6-7.938V4a2 2 0 00-2-2zM4 15v1m16-1v1"/></svg>
+                                            </div>
+                                            <div>
+                                                <p class="text-sm font-medium text-gray-900">Bots</p>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td class="px-6 py-4 text-xs text-gray-500">Allow users to create and manage their own bot accounts.</td>
+                                    <td class="px-6 py-4 text-center">
+                                        <button x-on:click="toggleUserBots()" :class="settings.allow_user_bots ? 'bg-indigo-600' : 'bg-gray-300'" class="relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none">
+                                            <span :class="settings.allow_user_bots ? 'translate-x-5' : 'translate-x-0'" class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out"></span>
                                         </button>
                                     </td>
                                 </tr>

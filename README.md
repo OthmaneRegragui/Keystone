@@ -13,7 +13,8 @@
 - **Virtual folder system** for organizing files within buckets
 - **Drag-and-drop uploads** with real-time progress tracking
 - **Secure authentication** with JWT + Argon2 password hashing + refresh token rotation
-- **Scoped API keys** for programmatic access (user and bot keys)
+- **Scoped API keys** for programmatic access (users manage their own from Account → API Keys; admins can create for any user or bot)
+- **Bot accounts** with scoped API keys for automated file operations (admins manage all; eligible users manage their own)
 - **Admin panel** with user management, group permissions, bucket configuration, and platform settings
 - **Modern file explorer** with list/grid views, breadcrumbs, search, and shareable `?dir=` deep links
 - **Background workers** for garbage collection, integrity checks, reference counting, and stats
@@ -203,18 +204,17 @@ keystone/
 │   │   └── rows/            # Database row structs
 │   ├── api/
 │   │   ├── routes.rs        # All route definitions
-│   │   ├── extractors.rs    # AuthUser JWT extractor
+│   │   ├── extractors.rs    # AuthUser JWT/API-key/bot extractor
 │   │   ├── validators.rs    # Input validation (scopes, DTOs)
-│   │   ├── middleware.rs    # Rate limiting, request logging, request ID
+│   │   ├── middleware/      # Rate limiting, request logging, request ID, bot gates
 │   │   ├── dto/             # Data transfer objects
 │   │   └── controllers/     # Request handlers
 │   │       ├── auth.rs      # Login, register, refresh, change-password
-│   │       ├── files.rs     # Upload, download, list, rename, move, delete
-│   │       ├── api_keys.rs  # User API key management
+│   │       ├── files.rs     # Upload, download, list, rename, move, copy, delete
 │   │       ├── health.rs    # Health checks, public settings
 │   │       └── admin/       # Admin controllers
 │   │           ├── stats.rs, settings.rs, buckets.rs
-│   │           ├── users.rs, groups.rs, api_keys.rs
+│   │           ├── users.rs, groups.rs, api_keys.rs, bots.rs
 │   ├── storage/
 │   │   ├── backend.rs       # StorageBackend trait
 │   │   ├── local.rs         # LocalFsBackend implementation
@@ -230,9 +230,10 @@ keystone/
 │   └── static/              # HTML pages (compiled in via include_str!)
 │       ├── admin.html       # Admin panel
 │       ├── docs.html        # Admin-only documentation page (/docs)
+│       ├── bots.html        # Bot management page (/bots) — admins all, eligible users own
+│       ├── orphans.html     # Admin-only orphaned-files page (/orphans)
 │       ├── files.html       # File explorer with drag-and-drop
 │       ├── account.html     # User account settings
-│       ├── api-keys.html    # API key management
 │       ├── login.html       # Login page
 │       ├── register.html    # Registration page
 │       ├── logo.svg         # Brand logo (favicon + in-app)
@@ -267,11 +268,12 @@ Users ──< group_members >── Groups ──< group_buckets >── Buckets
 - Bucket permissions are merged across groups (OR for upload/download, MAX for limits)
 - Buckets with `visible_to_users=true` give full access to all users automatically
 
-Groups also carry two account-level capability flags, toggled from the admin **Groups** page:
+Groups also carry account-level capability flags, toggled from the admin **Groups** page:
 
 | Flag | Effect |
 |------|--------|
-| `allow_api_keys` | Whether members may create/regenerate their own API keys |
+| `allow_api_keys` | Whether members may create and manage their own API keys (from the Account → API Keys tab) |
+| `allow_bots` | Whether members may create and manage their own bot accounts (from the Bots page) |
 | `allow_password_change` | Whether members may change their own password |
 
 These are evaluated with ANY-group-allow semantics: a user may use the capability if **any** of their groups permits it (a single restrictive group cannot block a member who also belongs to an allowed group). Users that belong to **no** group fall back to the global settings below. Admins are always allowed.
@@ -287,7 +289,8 @@ Runtime-configurable settings stored in the `admin_settings` table:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `block_registrations` | `true` | Block new user registrations |
-| `allow_user_api_keys` | `false` | Allow non-admin users to create API keys |
+| `allow_user_api_keys` | `false` | Whether users in **no** group may create and manage their own API keys (fallback when a user belongs to no group) |
+| `allow_user_bots` | `false` | Whether users in **no** group may create and manage their own bot accounts (fallback when a user belongs to no group) |
 | `allow_user_password_change` | `false` | Allow non-admin users to change their password |
 
 ## API Reference
@@ -350,6 +353,16 @@ Requires JWT. Admins always allowed; non-admins require the `allow_user_password
 { "current_password": "string", "new_password": "string (8+ chars)" }
 ```
 **Response (200):** `{ "message": "password updated successfully" }`
+
+### API Keys (per-user, Account → API Keys)
+
+Users can manage their own scoped API keys when their group has `allow_api_keys` (or the `allow_user_api_keys` setting for users in no group). Admins are always allowed. Creating/revoking keys requires a browser UI session (JWT); listing one's own keys works with a normal API key too. Bot keys are rejected on all of these.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/api-keys` | List the caller's own API keys |
+| POST | `/api/api-keys` | Create a key: `{ "name", "scopes": ["files:read", ...], "expires_in_days" }` — returns `full_key` (shown once) |
+| DELETE | `/api/api-keys/:id` | Permanently delete one of the caller's own keys |
 
 ### Files
 
@@ -428,26 +441,6 @@ Resolves a slash path (e.g. `/test/hello`) to a folder id for deep linking. `/` 
 #### DELETE `/api/folders/:id` — Delete Folder
 Children (subfolders and files) are moved to the parent (or bucket root). **Response (200):** `{ "message": "folder 'Documents' deleted" }`
 
-### User API Keys
-
-Max 1 active key per user. Admins always allowed; non-admins require the `allow_user_api_keys` setting. Valid scopes: `files:read`, `files:write`, `files:delete`, `users:read`, `users:write`, `admin`.
-
-#### POST `/api/api-keys` — Create API Key
-```json
-{ "name": "My App", "scopes": ["files:read", "files:write"], "expires_in_days": 30 }
-```
-**Response (201):** `{ "id": "uuid", "name": "My App", "full_key": "ks_live_abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGH", "prefix": "ks_live_abcd", "scopes": [...], "expires_at": "..." }`
-> `full_key` is shown only once — store it securely, it cannot be retrieved later.
-
-#### GET `/api/api-keys` — List API Keys
-**Response (200):** array of `{ id, name, prefix, scopes, last_used_at, expires_at, created_at, is_active }`.
-
-#### POST `/api/api-keys/revoke` — Revoke API Key
-Self-revocation only. `{ "id": "uuid" }` → `{ "message": "API key 'My App' has been revoked" }`
-
-#### POST `/api/api-keys/regenerate` — Regenerate API Key
-Deactivates the current key and creates a new one with default settings. Response same as Create.
-
 ### Buckets
 
 #### GET `/api/buckets` — List User's Accessible Buckets
@@ -465,14 +458,52 @@ Deactivates the current key and creates a new one with default settings. Respons
 | GET | `/api/health/ready` | Verifies DB connectivity: `{ "message": "ready" }` (no auth) |
 | GET | `/api/public/settings` | `{ "block_registrations": true }` (no auth) |
 
+### Bot API (only bot API keys)
+
+Bots are automations that act on behalf of their owner. A bot is limited to **buckets and file/folder operations** — upload, download, edit (rename), create, move, copy, delete, list. It can **never** access accounts, API keys, dashboard stats, health, settings, or admin endpoints.
+
+Bots use their own endpoint namespace **`/api/bot/*`**, which accepts **only bot API keys**. Bot keys are rejected on the regular `/api/*` endpoints, and ordinary users/API keys are rejected on `/api/bot/*` — the two surfaces are fully separated.
+
+Every bot is scoped by its capability flags (`can_upload`, `can_download`, `can_copy`, `can_edit`, `can_delete`, `can_list`) and its **path rules** — a list of `(bucket, path, allow|block)` rows; operations outside those limits fail with `403`. A bucket with no rule is fully accessible; an empty path means the whole bucket; `block` always wins over `allow`; a bucket that has rules is fail-closed (a path is allowed only when an `allow` rule covers it and no `block` rule does).
+
+```http
+Authorization: Bearer ks_...
+```
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/bot/buckets` | Buckets the bot can access (honors its path rules) |
+| POST | `/api/bot/files` | Upload file (multipart) |
+| GET | `/api/bot/files?bucket=&folder_id=&page=` | List files (paginated) |
+| POST | `/api/bot/files/batch-move` | Move multiple files at once |
+| POST | `/api/bot/files/batch-copy` | Copy multiple files at once |
+| POST | `/api/bot/files/batch-delete` | Delete multiple files at once |
+| GET | `/api/bot/files/:id` | File metadata |
+| GET | `/api/bot/files/:id/download` | Download bytes (attachment) |
+| GET | `/api/bot/files/:id/raw` | Raw bytes inline (images/videos/PDFs render in the browser) |
+| GET | `/api/bot/files/:id/verify` | Verify stored bytes match the recorded hash |
+| POST | `/api/bot/files/:id/rename` | Rename file (edit) |
+| POST | `/api/bot/files/:id/move` | Move file between folders |
+| POST | `/api/bot/files/:id/copy` | Copy file (content-addressed dedup) |
+| DELETE | `/api/bot/files/:id` | Delete file |
+| GET | `/api/bot/folders?bucket=&parent_id=` | List folder contents (files + folders) |
+| GET | `/api/bot/folders/all` | List all folders in a bucket (for building a tree) |
+| GET | `/api/bot/folders/resolve?bucket_id=&path=` | Resolve a path (e.g. `/test/hello`) to a folder id |
+| POST | `/api/bot/folders` | Create folder |
+| POST | `/api/bot/folders/:id/rename` | Rename folder |
+| POST | `/api/bot/folders/:id/move` | Move folder to a new parent |
+| DELETE | `/api/bot/folders/:id` | Delete folder |
+
+Requests and responses are identical to the corresponding `/api/*` endpoints above. Bot capabilities and path rules are enforced on every call — for example `can_upload` gates `POST /api/bot/files` and `POST /api/bot/folders`, and the bucket's path rules restrict which paths a bot may upload into, list, or read.
+
 ### Admin (all require `admin` role)
 
 #### Stats & Settings
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/admin/stats` | `{ total_users, total_files, total_buckets, total_groups, block_registrations, default_bucket }` |
-| GET | `/api/admin/settings` | `{ block_registrations, allow_user_api_keys, allow_user_password_change }` |
-| PUT | `/api/admin/settings` | Update setting: `{ "key": "allow_user_api_keys", "value": "true" }` — keys: `block_registrations`, `allow_user_api_keys`, `allow_user_password_change` (`"true"`/`"false"`), `default_bucket` (bucket name) |
+| GET | `/api/admin/settings` | `{ block_registrations, allow_user_api_keys, allow_user_bots, allow_user_password_change }` |
+| PUT | `/api/admin/settings` | Update setting: `{ "key": "allow_user_api_keys", "value": "true" }` — keys: `block_registrations`, `allow_user_api_keys`, `allow_user_bots`, `allow_user_password_change` (`"true"`/`"false"`), `default_bucket` (bucket name) |
 
 #### Buckets
 | Method | Path | Purpose |
@@ -512,6 +543,16 @@ Deactivates the current key and creates a new one with default settings. Respons
 | GET | `/api/admin/api-keys` | List all user and bot keys (`user_id`/`username` are `null` for bots) |
 | POST | `/api/admin/api-keys` | Create for any user or a bot: `{ "user_id": "uuid \| null", "name", "scopes", "expires_in_days" }` — bots get a `bot_` prefix |
 | DELETE | `/api/admin/api-keys/revoke` | Revoke any key: `{ "id" }` |
+
+#### Admin Bots
+Bots are managed through the UI at `/bots`. Admins see and manage **all** bots; a non-admin user may create and manage **their own** bots when their group has `allow_bots`, or (for users in no group) the `allow_user_bots` setting is enabled. These endpoints require a browser UI session (JWT) — they cannot be used with an API key. Once a bot exists, it talks to the platform exclusively through the dedicated [`/api/bot/*`](#bot-api-only-bot-api-keys) endpoints; it can never use these admin endpoints.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/admin/bots` | List all bot accounts (admin) or the caller's own bots (eligible user) |
+| POST | `/api/admin/bots` | Create a bot: `{ "user_id", "name", "can_upload", "can_download", "can_copy", "can_edit", "can_delete", "can_list", "allowed_buckets", "allowed_folder_ids", "allowed_file_ids", "upload_limit_bytes", "expires_in_days" }` — creates a scoped API key for the bot. Admins may pick any owner; an eligible user always gets a bot for themself |
+| PUT | `/api/admin/bots/:id` | Update bot permissions (all fields optional) — admin any bot, eligible user own bots only |
+| DELETE | `/api/admin/bots/:id` | Delete a bot and revoke its key — admin any bot, eligible user own bots only |
 
 ### Errors
 
@@ -564,9 +605,10 @@ The Files UI keeps the current location in the URL, so pages can be bookmarked a
 |-------|------|-------------|
 | `/`, `/dashboard` | Dashboard | Overview and quick actions |
 | `/files` | File Explorer | Browse, upload, organize files with folders |
-| `/api-keys` | API Keys | Manage personal API keys |
-| `/account` | Account | Profile, security, API key settings |
+| `/account` | Account | Profile, security settings, and per-user API key management |
 | `/admin` | Admin Panel | Users, groups, buckets, settings (admin only) |
+| `/bots` | Bots | Bot management — admins see all, eligible users manage their own (scoped API-key accounts) |
+| `/orphans` | Orphaned Files | Admin-only orphaned file reclamation |
 | `/docs` | Documentation | Admin-only ops + API reference (mirrors this README) |
 | `/login` | Login | User authentication |
 | `/register` | Register | New user registration |
@@ -629,7 +671,7 @@ volumes.
 
 ## Database
 
-PostgreSQL, automatic migrations on startup. Schema managed via 15 numbered migrations:
+PostgreSQL, automatic migrations on startup. Schema managed via 18 numbered migrations:
 
 - **Development** (default): derived from `POSTGRES_*` (or `postgres://keystone:keystone@localhost:5432/keystone`) — also set by `run.sh`
 - **Tests**: need a running Postgres. Each test binary creates its own database on demand, named after the binary (`keystone_test_<binary>`). Override the server with `TEST_DATABASE_BASE_URL` (default: `postgres://keystone:keystone@localhost:5432/postgres`), or set `TEST_DATABASE_URL` to use one pre-provisioned database verbatim.
@@ -646,6 +688,14 @@ PostgreSQL, automatic migrations on startup. Schema managed via 15 numbered migr
 8. Group bucket user storage limits
 9. User file bucket name
 10. Virtual folders
+11. Soft-deleted user files
+12. Storage paths
+13. Group bucket id
+14. Integer columns → bigint
+15. Storage root mount
+16. Group capability flags (`allow_api_keys`, `allow_bots`, `allow_password_change`)
+17. Bots table
+18. Bot capabilities (copy and edit permissions)
 
 ## License
 

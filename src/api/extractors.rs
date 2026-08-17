@@ -4,12 +4,38 @@ use async_trait::async_trait;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use crate::error::{AppError, AppResult};
-use crate::models::UserRole;
-use crate::db::repos::{ApiKeyRepository, UserRepository};
+use crate::models::{Bot, UserRole};
+use crate::db::repos::{ApiKeyRepository, BotRepository, UserRepository};
 use crate::utils::auth::api_keys::hash_api_key;
 use uuid::Uuid;
 
 use crate::AppState;
+
+/// Capability dimensions a bot may be granted. Used by
+/// [`AuthUser::require_bot_capability`] so every file operation can be gated
+/// on both the underlying API-key scope and the bot's finer-grained flags.
+#[derive(Debug, Clone, Copy)]
+pub enum BotCapability {
+    Upload,
+    Download,
+    Copy,
+    Edit,
+    Delete,
+    List,
+}
+
+impl BotCapability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BotCapability::Upload => "upload",
+            BotCapability::Download => "download",
+            BotCapability::Copy => "copy",
+            BotCapability::Edit => "edit",
+            BotCapability::Delete => "delete",
+            BotCapability::List => "list",
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AuthUser {
@@ -21,6 +47,9 @@ pub struct AuthUser {
     /// (normal UI user with unrestricted access); `Some(scopes)` when
     /// authenticated with an API key.
     pub scopes: Option<Vec<String>>,
+    /// When the request was authenticated with a bot's API key, the bot's
+    /// restriction record. `None` for normal JWT users and ordinary API keys.
+    pub bot: Option<Bot>,
 }
 
 impl AuthUser {
@@ -68,6 +97,48 @@ impl AuthUser {
                 "this action requires a UI session and cannot be performed with an API key"
                     .into(),
             ));
+        }
+        Ok(())
+    }
+
+    /// `true` when this request was authenticated with a bot's API key.
+    pub fn is_bot(&self) -> bool {
+        self.bot.is_some()
+    }
+
+    /// Enforce a bot capability flag. JWT/ordinary-API-key requests pass; a
+    /// bot request is denied unless its row grants the capability.
+    pub fn require_bot_capability(&self, cap: BotCapability) -> AppResult<()> {
+        if let Some(bot) = &self.bot {
+            let allowed = match cap {
+                BotCapability::Upload => bot.can_upload,
+                BotCapability::Download => bot.can_download,
+                BotCapability::Copy => bot.can_copy,
+                BotCapability::Edit => bot.can_edit,
+                BotCapability::Delete => bot.can_delete,
+                BotCapability::List => bot.can_list,
+            };
+            if !allowed {
+                return Err(AppError::Forbidden(format!(
+                    "bot '{}' is not allowed to {}",
+                    bot.name,
+                    cap.as_str()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Enforce the bot's bucket allow-list. A bot with an explicit allow-list
+    /// may only touch buckets in it; an unrestricted bot passes.
+    pub fn require_bot_bucket(&self, bucket: &str) -> AppResult<()> {
+        if let Some(bot) = &self.bot {
+            if !bot.bucket_allowed(bucket) {
+                return Err(AppError::Forbidden(format!(
+                    "bot '{}' cannot access bucket '{}'",
+                    bot.name, bucket
+                )));
+            }
         }
         Ok(())
     }
@@ -127,6 +198,7 @@ where
             username: user.username,
             email: user.email,
             scopes: None,
+            bot: None,
         })
     }
 }
@@ -156,12 +228,18 @@ impl AuthUser {
         // Best-effort usage tracking; failure must not break the request.
         let _ = ApiKeyRepository::update_last_used(state.db.pool(), api_key.id).await;
 
+        // A bot's key resolves to its owner's identity, but the request is then
+        // narrowed by the bot's restrictions (buckets, folders, files,
+        // capabilities, upload cap).
+        let bot = BotRepository::find_by_key_id(state.db.pool(), api_key.id).await?;
+
         Ok(AuthUser {
             user_id: user.id,
             role: user.role,
             username: user.username,
             email: user.email,
             scopes: Some(api_key.scopes),
+            bot,
         })
     }
 }

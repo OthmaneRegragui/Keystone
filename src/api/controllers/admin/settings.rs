@@ -41,6 +41,11 @@ pub async fn update_setting(
             AdminSettingRepository::set_bool(state.db.pool(), "allow_user_password_change", val).await?;
             info!("admin {} set allow_user_password_change={}", auth.username, val);
         }
+        "allow_user_bots" => {
+            let val = body.value == "true";
+            AdminSettingRepository::set_bool(state.db.pool(), "allow_user_bots", val).await?;
+            info!("admin {} set allow_user_bots={}", auth.username, val);
+        }
         _ => {
             return Err(AppError::BadRequest(format!("unknown setting key: {}", body.key)));
         }

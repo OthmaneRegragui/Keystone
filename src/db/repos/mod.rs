@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod api_keys;
 pub mod audit;
+pub mod bots;
 pub mod buckets;
 pub mod files;
 pub mod folders;
@@ -14,6 +15,7 @@ pub mod user_files;
 pub use admin::{AdminSettingRepository, BucketRepository, GroupRepository};
 pub use api_keys::ApiKeyRepository;
 pub use audit::AuditLogRepository;
+pub use bots::BotRepository;
 pub use files::FileRepository;
 pub use folders::FolderRepository;
 pub use storage::StorageObjectRepository;

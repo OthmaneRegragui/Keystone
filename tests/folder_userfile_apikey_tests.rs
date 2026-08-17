@@ -541,17 +541,17 @@ async fn test_userfile_list_by_user() {
         .unwrap();
     }
 
-    let page1 = UserFileRepository::list_by_user(pool, user_id, 0, 3, None, None, None)
+    let page1 = UserFileRepository::list_by_user(pool, user_id, 0, 3, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(page1.len(), 3);
 
-    let page2 = UserFileRepository::list_by_user(pool, user_id, 3, 3, None, None, None)
+    let page2 = UserFileRepository::list_by_user(pool, user_id, 3, 3, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(page2.len(), 2);
 
-    let all = UserFileRepository::list_by_user(pool, user_id, 0, 100, None, None, None)
+    let all = UserFileRepository::list_by_user(pool, user_id, 0, 100, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(all.len(), 5);
@@ -586,13 +586,13 @@ async fn test_userfile_list_by_user_search() {
     .await
     .unwrap();
 
-    let results = UserFileRepository::list_by_user(pool, user_id, 0, 100, Some("report"), None, None)
+    let results = UserFileRepository::list_by_user(pool, user_id, 0, 100, Some("report"), None, None, None)
         .await
         .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0.original_name, "report.pdf");
 
-    let all = UserFileRepository::list_by_user(pool, user_id, 0, 100, None, None, None)
+    let all = UserFileRepository::list_by_user(pool, user_id, 0, 100, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(all.len(), 2);
@@ -621,7 +621,7 @@ async fn test_userfile_list_by_user_bucket_filter() {
     .unwrap();
 
     let results =
-        UserFileRepository::list_by_user(pool, user_id, 0, 100, None, Some("bucket-a"), None)
+        UserFileRepository::list_by_user(pool, user_id, 0, 100, None, Some("bucket-a"), None, None)
             .await
             .unwrap();
     assert_eq!(results.len(), 1);
@@ -652,7 +652,7 @@ async fn test_userfile_list_by_user_folder_filter() {
     UserFileRepository::create(pool, uf2).await.unwrap();
 
     let results =
-        UserFileRepository::list_by_user(pool, user_id, 0, 100, None, None, Some(folder.id))
+        UserFileRepository::list_by_user(pool, user_id, 0, 100, None, None, Some(folder.id), None)
             .await
             .unwrap();
     assert_eq!(results.len(), 1);
@@ -665,7 +665,7 @@ async fn test_userfile_count_by_user() {
     let pool = db.pool();
     let user_id = create_test_user(pool).await;
 
-    let count = UserFileRepository::count_by_user(pool, user_id, None, None, None)
+    let count = UserFileRepository::count_by_user(pool, user_id, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(count, 0);
@@ -680,7 +680,7 @@ async fn test_userfile_count_by_user() {
         .unwrap();
     }
 
-    let count = UserFileRepository::count_by_user(pool, user_id, None, None, None)
+    let count = UserFileRepository::count_by_user(pool, user_id, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(count, 3);
