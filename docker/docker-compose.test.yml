@@ -1,0 +1,33 @@
+# docker-compose.test.yml - Ephemeral PostgreSQL for running integration tests.
+#
+# Usage (via test.sh):
+#   ./test.sh              # start db, run tests, tear down
+#   ./test.sh --keep       # start db, run tests, keep db running
+#   ./test.sh up           # only start the test database
+#   ./test.sh down         # only stop the test database
+#
+# Manual:
+#   docker compose -f docker/docker-compose.test.yml --project-name keystone-test up -d
+#   TEST_DATABASE_BASE_URL=postgres://test:test@localhost:5434/postgres \
+#     RUST_TEST_THREADS=1 APP_ENV=test cargo test
+#   docker compose -f docker/docker-compose.test.yml --project-name keystone-test down -v
+
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: keystone-test-postgres
+    stop_grace_period: 5s
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: postgres
+    ports:
+      - "5434:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d postgres -p 5432"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 2s

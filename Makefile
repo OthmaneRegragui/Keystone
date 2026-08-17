@@ -1,4 +1,4 @@
-.PHONY: dev build test clean migrate lint format run setup
+.PHONY: dev build test test-docker test-docker-up test-docker-down test-docker-keep clean migrate lint format run setup
 
 # Development server
 dev:
@@ -68,6 +68,28 @@ docker-db-reset:
 
 docker-logs:
 	docker compose logs -f
+
+# Docker-based testing (spins up an isolated PostgreSQL container)
+# Run tests then tear down the container
+test-docker:
+	./test.sh
+
+# Run tests, leave the test database running for inspection
+test-docker-keep:
+	./test.sh --keep
+
+# Start only the test database
+test-docker-up:
+	./test.sh up
+
+# Stop and remove the test database
+test-docker-down:
+	./test.sh down
+
+# Run a specific test file in Docker
+# Example: make test-docker-file FILE=api_auth_tests
+test-docker-file:
+	./test.sh --test $(FILE)
 
 # Check everything
 check:
