@@ -140,6 +140,18 @@ async fn create_folder(app: &axum::Router, token: &str, name: &str, bucket: &str
     helpers::response_json(resp).await["id"].as_str().unwrap().to_string()
 }
 
+async fn create_folder_in(app: &axum::Router, token: &str, name: &str, bucket: &str, parent_id: &str) -> String {
+    let resp = helpers::json_post_auth(
+        app,
+        "/api/folders",
+        &serde_json::json!({ "name": name, "bucket_name": bucket, "parent_id": parent_id }),
+        token,
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "folder create failed for {name}");
+    helpers::response_json(resp).await["id"].as_str().unwrap().to_string()
+}
+
 // ─── File Move ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -868,4 +880,354 @@ async fn test_list_files_search() {
     let json = helpers::response_json(resp).await;
     assert_eq!(json["total"], 1);
     assert_eq!(json["files"].as_array().unwrap()[0]["name"], "report.pdf");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Trash Bin Tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_delete_file_appears_in_trash() {
+    let (app, state) = build_app().await;
+    let (user_id, _u, email, password) =
+        helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
+    setup_bucket_access(&state, user_id, "default").await;
+    let token = helpers::login_user(&app, &email, &password).await;
+
+    let (ufid, _) = upload_file(&app, &token, b"trash me", "trashed.txt", "default").await;
+
+    let resp = helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &token).await;
+    assert_eq!(resp.status(), 200);
+
+    let resp = helpers::get_auth(&app, "/api/files?bucket=default", &token).await;
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["total"], 0);
+
+    let resp = helpers::get_auth(&app, "/api/trash", &token).await;
+    assert_eq!(resp.status(), 200);
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["files"].as_array().unwrap().len(), 1);
+    assert_eq!(json["files"].as_array().unwrap()[0]["name"], "trashed.txt");
+    assert!(json["files"].as_array().unwrap()[0]["deleted_at"].is_string());
+}
+
+#[tokio::test]
+async fn test_restore_file_from_trash() {
+    let (app, state) = build_app().await;
+    let (user_id, _u, email, password) =
+        helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
+    setup_bucket_access(&state, user_id, "default").await;
+    let token = helpers::login_user(&app, &email, &password).await;
+
+    let (ufid, _) = upload_file(&app, &token, b"restorable", "restore.txt", "default").await;
+
+    helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &token).await;
+
+    let resp = helpers::json_post_auth(
+        &app,
+        &format!("/api/trash/file/{ufid}/restore"),
+        &serde_json::json!({}),
+        &token,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    let resp = helpers::get_auth(&app, "/api/files?bucket=default", &token).await;
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["total"], 1);
+    assert_eq!(json["files"].as_array().unwrap()[0]["name"], "restore.txt");
+
+    let resp = helpers::get_auth(&app, "/api/trash", &token).await;
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["files"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_restore_file_to_folder() {
+    let (app, state) = build_app().await;
+    let (user_id, _u, email, password) =
+        helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
+    setup_bucket_access(&state, user_id, "default").await;
+    let token = helpers::login_user(&app, &email, &password).await;
+
+    let folder_id = create_folder(&app, &token, "docs", "default").await;
+    let (ufid, _) = upload_file(&app, &token, b"movable", "movable.txt", "default").await;
+
+    helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &token).await;
+
+    let resp = helpers::json_post_auth(
+        &app,
+        &format!("/api/trash/file/{ufid}/restore"),
+        &serde_json::json!({ "folder_id": folder_id }),
+        &token,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    let resp = helpers::get_auth(&app, &format!("/api/folders/{folder_id}/files"), &token).await;
+    assert_eq!(resp.status(), 200);
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["files"].as_array().unwrap().len(), 1);
+    assert_eq!(json["files"].as_array().unwrap()[0]["name"], "movable.txt");
+}
+
+#[tokio::test]
+async fn test_permanent_delete_file_from_trash() {
+    let (app, state) = build_app().await;
+    let (user_id, _u, email, password) =
+        helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
+    setup_bucket_access(&state, user_id, "default").await;
+    let token = helpers::login_user(&app, &email, &password).await;
+
+    let (ufid, _) = upload_file(&app, &token, b"gone forever", "perm.txt", "default").await;
+
+    helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &token).await;
+
+    let resp = helpers::delete_auth(&app, &format!("/api/trash/file/{ufid}"), &token).await;
+    assert_eq!(resp.status(), 200);
+
+    let resp = helpers::get_auth(&app, "/api/trash", &token).await;
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["files"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_trash_requires_auth() {
+    let (app, _state) = build_app().await;
+
+    let resp = helpers::get_no_auth(&app, "/api/trash").await;
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn test_restore_nonexistent_from_trash() {
+    let (app, state) = build_app().await;
+    let (_uid, _u, email, password) =
+        helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
+    let token = helpers::login_user(&app, &email, &password).await;
+
+    let fake_id = Uuid::new_v4();
+    let resp = helpers::json_post_auth(
+        &app,
+        &format!("/api/trash/file/{fake_id}/restore"),
+        &serde_json::json!({}),
+        &token,
+    )
+    .await;
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn test_permanent_delete_nonexistent_from_trash() {
+    let (app, state) = build_app().await;
+    let (_uid, _u, email, password) =
+        helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
+    let token = helpers::login_user(&app, &email, &password).await;
+
+    let fake_id = Uuid::new_v4();
+    let resp = helpers::delete_auth(&app, &format!("/api/trash/file/{fake_id}"), &token).await;
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn test_trash_isolation_between_users() {
+    let (app, state) = build_app().await;
+    let (uid1, _u1, email1, pass1) =
+        helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
+    setup_bucket_access(&state, uid1, "default").await;
+    let (uid2, _u2, email2, pass2) =
+        helpers::create_test_user(&state.db, UserRole::User, "pass456").await;
+    setup_bucket_access(&state, uid2, "default").await;
+
+    let token1 = helpers::login_user(&app, &email1, &pass1).await;
+    let token2 = helpers::login_user(&app, &email2, &pass2).await;
+
+    let (ufid, _) = upload_file(&app, &token1, b"user1 file", "user1.txt", "default").await;
+    helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &token1).await;
+
+    let resp = helpers::get_auth(&app, "/api/trash", &token1).await;
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["files"].as_array().unwrap().len(), 1);
+
+    let resp = helpers::get_auth(&app, "/api/trash", &token2).await;
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["files"].as_array().unwrap().len(), 0);
+
+    let resp = helpers::json_post_auth(
+        &app,
+        &format!("/api/trash/file/{ufid}/restore"),
+        &serde_json::json!({}),
+        &token2,
+    )
+    .await;
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn test_batch_delete_files_appear_in_trash() {
+    let (app, state) = build_app().await;
+    let (user_id, _u, email, password) =
+        helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
+    setup_bucket_access(&state, user_id, "default").await;
+    let token = helpers::login_user(&app, &email, &password).await;
+
+    let (ufid1, _) = upload_file(&app, &token, b"a", "a.txt", "default").await;
+    let (ufid2, _) = upload_file(&app, &token, b"b", "b.txt", "default").await;
+
+    helpers::json_post_auth(
+        &app,
+        "/api/files/batch-delete",
+        &serde_json::json!({ "file_ids": [ufid1, ufid2] }),
+        &token,
+    )
+    .await;
+
+    let resp = helpers::get_auth(&app, "/api/trash", &token).await;
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["files"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn test_restore_does_not_duplicate_file() {
+    let (app, state) = build_app().await;
+    let (user_id, _u, email, password) =
+        helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
+    setup_bucket_access(&state, user_id, "default").await;
+    let token = helpers::login_user(&app, &email, &password).await;
+
+    let (ufid, _) = upload_file(&app, &token, b"unique", "nodup.txt", "default").await;
+
+    helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &token).await;
+    helpers::json_post_auth(
+        &app,
+        &format!("/api/trash/file/{ufid}/restore"),
+        &serde_json::json!({}),
+        &token,
+    )
+    .await;
+
+    let resp = helpers::get_auth(&app, "/api/files?bucket=default", &token).await;
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["total"], 1);
+
+    let resp = helpers::get_auth(&app, "/api/trash", &token).await;
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["files"].as_array().unwrap().len(), 0);
+}
+
+// ─── Folder Trash Tests ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_delete_folder_appears_in_trash_with_files() {
+    let (app, state) = build_app().await;
+    let (user_id, _u, email, password) =
+        helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
+    setup_bucket_access(&state, user_id, "default").await;
+    let token = helpers::login_user(&app, &email, &password).await;
+
+    let folder_id = create_folder(&app, &token, "photos", "default").await;
+    upload_file_in_folder(&app, &token, b"pic1", "pic1.jpg", "default", &folder_id).await;
+    upload_file_in_folder(&app, &token, b"pic2", "pic2.jpg", "default", &folder_id).await;
+
+    let resp = helpers::delete_auth(&app, &format!("/api/folders/{folder_id}"), &token).await;
+    assert_eq!(resp.status(), 200);
+
+    // Folder and files should be in trash
+    let resp = helpers::get_auth(&app, "/api/trash", &token).await;
+    assert_eq!(resp.status(), 200);
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["folders"].as_array().unwrap().len(), 1);
+    assert_eq!(json["folders"].as_array().unwrap()[0]["name"], "photos");
+    assert_eq!(json["files"].as_array().unwrap().len(), 2);
+
+    // Folder should be gone from active listing
+    let resp = helpers::get_auth(&app, "/api/folders/all?bucket=default", &token).await;
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["folders"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_restore_folder_from_trash() {
+    let (app, state) = build_app().await;
+    let (user_id, _u, email, password) =
+        helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
+    setup_bucket_access(&state, user_id, "default").await;
+    let token = helpers::login_user(&app, &email, &password).await;
+
+    let folder_id = create_folder(&app, &token, "work", "default").await;
+    upload_file_in_folder(&app, &token, b"doc1", "doc1.txt", "default", &folder_id).await;
+
+    helpers::delete_auth(&app, &format!("/api/folders/{folder_id}"), &token).await;
+
+    // Restore folder
+    let resp = helpers::json_post_auth(
+        &app,
+        &format!("/api/trash/folder/{folder_id}/restore"),
+        &serde_json::json!({}),
+        &token,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    // Folder is back
+    let resp = helpers::get_auth(&app, "/api/folders/all?bucket=default", &token).await;
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["folders"].as_array().unwrap().len(), 1);
+    assert_eq!(json["folders"].as_array().unwrap()[0]["name"], "work");
+
+    // Files are back in the folder
+    let resp = helpers::get_auth(&app, &format!("/api/folders/{folder_id}/files"), &token).await;
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["files"].as_array().unwrap().len(), 1);
+
+    // Trash is empty
+    let resp = helpers::get_auth(&app, "/api/trash", &token).await;
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["folders"].as_array().unwrap().len(), 0);
+    assert_eq!(json["files"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_delete_nested_folder_preserves_hierarchy_in_trash() {
+    let (app, state) = build_app().await;
+    let (user_id, _u, email, password) =
+        helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
+    setup_bucket_access(&state, user_id, "default").await;
+    let token = helpers::login_user(&app, &email, &password).await;
+
+    let parent_id = create_folder(&app, &token, "projects", "default").await;
+    let child_id = create_folder_in(&app, &token, "keystone", "default", &parent_id).await;
+    upload_file_in_folder(&app, &token, b"code", "main.rs", "default", &child_id).await;
+
+    helpers::delete_auth(&app, &format!("/api/folders/{parent_id}"), &token).await;
+
+    let resp = helpers::get_auth(&app, "/api/trash", &token).await;
+    let json = helpers::response_json(resp).await;
+
+    // Both folders should appear in trash
+    assert_eq!(json["folders"].as_array().unwrap().len(), 2);
+    // And the file
+    assert_eq!(json["files"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_permanent_delete_folder_from_trash() {
+    let (app, state) = build_app().await;
+    let (user_id, _u, email, password) =
+        helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
+    setup_bucket_access(&state, user_id, "default").await;
+    let token = helpers::login_user(&app, &email, &password).await;
+
+    let folder_id = create_folder(&app, &token, "temp", "default").await;
+    upload_file_in_folder(&app, &token, b"data", "data.bin", "default", &folder_id).await;
+
+    helpers::delete_auth(&app, &format!("/api/folders/{folder_id}"), &token).await;
+
+    let resp = helpers::delete_auth(&app, &format!("/api/trash/folder/{folder_id}"), &token).await;
+    assert_eq!(resp.status(), 200);
+
+    let resp = helpers::get_auth(&app, "/api/trash", &token).await;
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["folders"].as_array().unwrap().len(), 0);
+    assert_eq!(json["files"].as_array().unwrap().len(), 0);
 }

@@ -18,6 +18,7 @@ struct UserFileWithMetaRow {
     pub bucket_name: Option<String>,
     pub folder_id: Option<String>,
     pub deleted_at: Option<String>,
+    pub purged_at: Option<String>,
     pub blake3_hash: String,
     pub size: i64,
     pub ref_count: i32,
@@ -35,6 +36,7 @@ impl UserFileWithMetaRow {
             bucket_name: self.bucket_name,
             folder_id: self.folder_id,
             deleted_at: self.deleted_at,
+            purged_at: self.purged_at,
         });
         (uf, self.blake3_hash, self.size, self.ref_count)
     }
@@ -148,8 +150,8 @@ pub struct UserFileExportRow {
 }
 
 /// Flat row for the admin orphaned-files view: a physical file with no
-/// remaining active references, annotated with its most recent soft-deleted
-/// reference (name, bucket, owner, when it became unreachable).
+/// remaining active references, annotated with its most recent reference
+/// (name, bucket, owner, when it became unreachable).
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct OrphanedFileRow {
     pub file_id: String,
@@ -285,6 +287,196 @@ impl UserFileRepository {
         Ok(affected > 0)
     }
 
+    /// Restore a soft-deleted file and optionally move it to a different folder.
+    pub async fn restore_to_folder(pool: &PgPool, id: Uuid, folder_id: Option<Uuid>) -> AppResult<bool> {
+        let affected = sqlx::query(
+            "UPDATE user_files SET deleted_at = NULL, folder_id = $1 WHERE id = $2 AND deleted_at IS NOT NULL",
+        )
+        .bind(folder_id.map(|f| f.to_string()))
+        .bind(id.to_string())
+        .execute(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to restore user_file to folder: {e}")))?
+        .rows_affected();
+
+        Ok(affected > 0)
+    }
+
+    /// List non-deleted files in a folder for a user. Returns (UserFile, blake3_hash, size).
+    pub async fn list_by_folder(
+        pool: &PgPool,
+        user_id: Uuid,
+        folder_id: Uuid,
+    ) -> AppResult<Vec<(UserFile, String, i64)>> {
+        let rows = sqlx::query_as::<_, UserFileWithMetaRow>(
+            r#"SELECT uf.*, f.blake3_hash, f.size, f.ref_count
+               FROM user_files uf
+               JOIN files f ON uf.file_id = f.id
+               WHERE uf.user_id = $1 AND uf.folder_id = $2 AND uf.deleted_at IS NULL
+               ORDER BY uf.original_name ASC"#,
+        )
+        .bind(user_id.to_string())
+        .bind(folder_id.to_string())
+        .fetch_all(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to list files in folder: {e}")))?;
+
+        Ok(rows.into_iter().map(|row| {
+            let uf = UserFile::from(UserFileRow {
+                id: row.id,
+                user_id: row.user_id,
+                file_id: row.file_id,
+                original_name: row.original_name,
+                mime_type: row.mime_type,
+                created_at: row.created_at,
+                bucket_name: row.bucket_name,
+                folder_id: row.folder_id,
+                deleted_at: row.deleted_at,
+                purged_at: row.purged_at,
+            });
+            (uf, row.blake3_hash, row.size)
+        }).collect())
+    }
+
+    // ── Trash (soft-deleted files visible to the owning user) ──
+
+    /// List soft-deleted files for a user (the user's trash bin).
+    /// Joins with the files table to get size and hash.
+    pub async fn list_trashed_by_user(
+        pool: &PgPool,
+        user_id: Uuid,
+        offset: i64,
+        limit: i64,
+    ) -> AppResult<(Vec<(UserFile, String, i64)>, i64)> {
+        let count_row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM user_files WHERE user_id = $1 AND deleted_at IS NOT NULL AND purged_at IS NULL",
+        )
+        .bind(user_id.to_string())
+        .fetch_one(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to count trashed files: {e}")))?;
+
+        let rows = sqlx::query_as::<_, UserFileWithMetaRow>(
+            r#"SELECT uf.*, f.blake3_hash, f.size, f.ref_count
+               FROM user_files uf
+               JOIN files f ON uf.file_id = f.id
+               WHERE uf.user_id = $1 AND uf.deleted_at IS NOT NULL AND uf.purged_at IS NULL
+               ORDER BY uf.deleted_at DESC
+               LIMIT $2 OFFSET $3"#,
+        )
+        .bind(user_id.to_string())
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to list trashed files: {e}")))?;
+
+        let files: Vec<(UserFile, String, i64)> = rows.into_iter().map(|row| {
+            let uf = UserFile::from(UserFileRow {
+                id: row.id,
+                user_id: row.user_id,
+                file_id: row.file_id,
+                original_name: row.original_name,
+                mime_type: row.mime_type,
+                created_at: row.created_at,
+                bucket_name: row.bucket_name,
+                folder_id: row.folder_id,
+                deleted_at: row.deleted_at,
+                purged_at: row.purged_at,
+            });
+            (uf, row.blake3_hash, row.size)
+        }).collect();
+
+        Ok((files, count_row.0))
+    }
+
+    /// Find a soft-deleted user_file by user_id and user_file id (for trash operations).
+    pub async fn find_trashed_by_user_and_id(
+        pool: &PgPool,
+        user_id: Uuid,
+        user_file_id: Uuid,
+    ) -> AppResult<Option<UserFile>> {
+        let row = sqlx::query_as::<_, UserFileRow>(
+            "SELECT * FROM user_files WHERE user_id = $1 AND id = $2 AND deleted_at IS NOT NULL AND purged_at IS NULL",
+        )
+        .bind(user_id.to_string())
+        .bind(user_file_id.to_string())
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to query trashed user_file: {e}")))?;
+
+        Ok(row.map(UserFile::from))
+    }
+
+    /// Permanently delete a soft-deleted user_file row.
+    /// Does NOT touch the physical file or storage objects — only removes the user's reference.
+    pub async fn hard_delete(pool: &PgPool, id: Uuid) -> AppResult<bool> {
+        let affected = sqlx::query(
+            "DELETE FROM user_files WHERE id = $1 AND deleted_at IS NOT NULL",
+        )
+        .bind(id.to_string())
+        .execute(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to hard-delete user_file: {e}")))?
+        .rows_affected();
+
+        Ok(affected > 0)
+    }
+
+    /// Turn a trashed user_file into a tombstone: the row survives with
+    /// `purged_at` set so the physical file stays attributable in the admin
+    /// orphans view, but the entry disappears from the trash and no longer
+    /// occupies its (user, file, name) slot. The caller is responsible for
+    /// decrementing the physical file's ref_count.
+    pub async fn mark_purged(pool: &PgPool, id: Uuid) -> AppResult<bool> {
+        let now = Utc::now().to_rfc3339();
+        let affected = sqlx::query(
+            "UPDATE user_files SET purged_at = $1 WHERE id = $2 AND deleted_at IS NOT NULL AND purged_at IS NULL",
+        )
+        .bind(now)
+        .bind(id.to_string())
+        .execute(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to purge user_file: {e}")))?
+        .rows_affected();
+
+        Ok(affected > 0)
+    }
+
+    /// Mark all trashed files inside the given folders as purged (tombstone),
+    /// returning the file ids whose ref_count must be decremented.
+    pub async fn mark_purged_in_folders(
+        pool: &PgPool,
+        user_id: Uuid,
+        folder_ids: &[String],
+    ) -> AppResult<Vec<String>> {
+        if folder_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let now = Utc::now().to_rfc3339();
+        let placeholders: Vec<String> = folder_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("${}", i + 3))
+            .collect();
+        let sql = format!(
+            "UPDATE user_files SET purged_at = $1 WHERE user_id = $2 AND folder_id IN ({}) AND deleted_at IS NOT NULL AND purged_at IS NULL RETURNING file_id",
+            placeholders.join(", ")
+        );
+        let mut query = sqlx::query_as::<_, (String,)>(&sql)
+            .bind(now)
+            .bind(user_id.to_string());
+        for fid in folder_ids {
+            query = query.bind(fid);
+        }
+        let rows = query
+            .fetch_all(pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to purge user_files: {e}")))?;
+
+        Ok(rows.into_iter().map(|(fid,)| fid).collect())
+    }
+
     /// List all user_files for a specific user, with pagination, search, bucket filter, and folder filter.
     /// Joins with the files table to get size, hash, and ref_count.
     ///
@@ -371,7 +563,7 @@ impl UserFileRepository {
                    WHERE uf.user_id = $1 AND uf.deleted_at IS NULL
                )
                SELECT id, user_id, file_id, original_name, mime_type, created_at,
-                      bucket_name, folder_id, deleted_at, blake3_hash, size, ref_count
+                      bucket_name, folder_id, deleted_at, purged_at, blake3_hash, size, ref_count
                FROM file_rows
                WHERE {where_clause}
                ORDER BY created_at DESC
@@ -585,7 +777,7 @@ impl UserFileRepository {
             r#"SELECT uf.bucket_name, COUNT(*) as cnt, COALESCE(SUM(f.size), 0)::BIGINT as total
                FROM user_files uf
                JOIN files f ON uf.file_id = f.id
-               WHERE uf.deleted_at IS NOT NULL
+               WHERE uf.deleted_at IS NOT NULL AND uf.purged_at IS NULL
                GROUP BY uf.bucket_name"#,
         )
         .fetch_all(pool)
@@ -760,19 +952,18 @@ impl UserFileRepository {
     }
 
     /// Count and total size of ORPHANED physical files:
-    /// files where ALL user_files references are soft-deleted (no active reference exists).
+    /// files with NO active user_files reference. This covers both files whose
+    /// every reference is soft-deleted (in some user's trash) and files whose
+    /// references were permanently deleted from the trash.
     /// These files waste disk space but nobody can use them.
     /// Returns (count, total_size).
     pub async fn orphaned_physical_files_global(
         pool: &PgPool,
     ) -> AppResult<(i64, i64)> {
         let row: (i64, i64) = sqlx::query_as(
-            r#"SELECT COUNT(DISTINCT f.id), COALESCE(SUM(DISTINCT f.size), 0)::BIGINT
+            r#"SELECT COUNT(*), COALESCE(SUM(f.size), 0)::BIGINT
                FROM files f
-               WHERE EXISTS (
-                   SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NOT NULL
-               )
-               AND NOT EXISTS (
+               WHERE NOT EXISTS (
                    SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NULL
                )"#,
         )
@@ -784,19 +975,28 @@ impl UserFileRepository {
     }
 
     /// Per-bucket orphaned physical files stats:
-    /// physical files where ALL references in this bucket are soft-deleted.
+    /// physical files whose EVERY reference is soft-deleted, attributed to the
+    /// bucket of their most recent reference. Files with no references left at
+    /// all have no bucket to attribute them to and are counted only in the
+    /// global stats.
     /// Returns Vec<(bucket_name, orphaned_count, orphaned_size)>.
     pub async fn orphaned_physical_files_per_bucket(
         pool: &PgPool,
     ) -> AppResult<Vec<(String, i64, i64)>> {
         let rows: Vec<(String, i64, i64)> = sqlx::query_as(
-            r#"SELECT uf.bucket_name, COUNT(DISTINCT f.id), COALESCE(SUM(DISTINCT f.size), 0)::BIGINT
+            r#"SELECT lr.bucket_name, COUNT(*) AS cnt, COALESCE(SUM(f.size), 0)::BIGINT AS total
                FROM files f
-               JOIN user_files uf ON uf.file_id = f.id AND uf.deleted_at IS NOT NULL
-               WHERE NOT EXISTS (
-                   SELECT 1 FROM user_files uf2 WHERE uf2.file_id = f.id AND uf2.deleted_at IS NULL
-               )
-               GROUP BY uf.bucket_name"#,
+               JOIN LATERAL (
+                   SELECT uf.bucket_name FROM user_files uf
+                   WHERE uf.file_id = f.id
+                   ORDER BY uf.deleted_at DESC NULLS LAST, uf.created_at DESC
+                   LIMIT 1
+               ) lr ON true
+               WHERE lr.bucket_name IS NOT NULL
+                 AND NOT EXISTS (
+                     SELECT 1 FROM user_files uf2 WHERE uf2.file_id = f.id AND uf2.deleted_at IS NULL
+                 )
+               GROUP BY lr.bucket_name"#,
         )
         .fetch_all(pool)
         .await
@@ -805,20 +1005,32 @@ impl UserFileRepository {
         Ok(rows)
     }
 
-    /// Total count and combined size of orphaned physical files (admin detail view).
-    /// Same definition as `orphaned_physical_files_global`: a physical file whose
-    /// EVERY user_files reference is soft-deleted.
-    pub async fn orphaned_files_total(pool: &PgPool) -> AppResult<(i64, i64)> {
+    /// Total count and combined size of orphaned physical files (admin detail view),
+    /// optionally filtered by the last reference's bucket and owner user id.
+    /// Orphaned = NO active reference (all references soft-deleted or permanently deleted).
+    pub async fn orphaned_files_total(
+        pool: &PgPool,
+        bucket: Option<&str>,
+        owner_id: Option<&str>,
+    ) -> AppResult<(i64, i64)> {
         let row: (i64, i64) = sqlx::query_as(
-            r#"SELECT COUNT(DISTINCT f.id), COALESCE(SUM(DISTINCT f.size), 0)::BIGINT
+            r#"SELECT COUNT(*), COALESCE(SUM(f.size), 0)::BIGINT
                FROM files f
-               WHERE EXISTS (
-                   SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NOT NULL
+               LEFT JOIN LATERAL (
+                   SELECT uf.original_name, uf.bucket_name, uf.user_id
+                   FROM user_files uf
+                   WHERE uf.file_id = f.id
+                   ORDER BY uf.deleted_at DESC NULLS LAST, uf.created_at DESC
+                   LIMIT 1
+               ) lr ON true
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM user_files uf2 WHERE uf2.file_id = f.id AND uf2.deleted_at IS NULL
                )
-               AND NOT EXISTS (
-                   SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NULL
-               )"#,
+               AND ($1 IS NULL OR lr.bucket_name = $1)
+               AND ($2 IS NULL OR lr.user_id = $2)"#,
         )
+        .bind(bucket)
+        .bind(owner_id)
         .fetch_one(pool)
         .await
         .map_err(|e| AppError::Internal(format!("failed to count orphaned files: {e}")))?;
@@ -826,16 +1038,55 @@ impl UserFileRepository {
         Ok(row)
     }
 
-    /// All physical file ids that are orphaned (every user_files reference
-    /// soft-deleted). Used by the admin "delete all" action.
+    /// Filter facets for the orphaned-files admin page: distinct buckets and
+    /// owners (attributed via each file's most recent reference).
+    /// Returns (buckets, owners as (user_id, username)).
+    pub async fn orphaned_file_facets(
+        pool: &PgPool,
+    ) -> AppResult<(Vec<String>, Vec<(String, String)>)> {
+        let rows: Vec<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+            r#"SELECT DISTINCT lr.bucket_name, lr.user_id, u.username
+               FROM files f
+               LEFT JOIN LATERAL (
+                   SELECT uf.bucket_name, uf.user_id
+                   FROM user_files uf
+                   WHERE uf.file_id = f.id
+                   ORDER BY uf.deleted_at DESC NULLS LAST, uf.created_at DESC
+                   LIMIT 1
+               ) lr ON true
+               LEFT JOIN users u ON u.id = lr.user_id
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM user_files uf2 WHERE uf2.file_id = f.id AND uf2.deleted_at IS NULL
+               )"#,
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to list orphaned file facets: {e}")))?;
+
+        let mut buckets: Vec<String> = rows.iter().filter_map(|(b, _, _)| b.clone()).collect();
+        buckets.sort();
+        buckets.dedup();
+
+        let mut owners: Vec<(String, String)> = rows
+            .iter()
+            .filter_map(|(_, uid, uname)| {
+                let id = uid.clone()?;
+                Some((id.clone(), uname.clone().unwrap_or(id)))
+            })
+            .collect();
+        owners.sort_by(|a, b| a.1.cmp(&b.1));
+        owners.dedup_by(|a, b| a.0 == b.0);
+
+        Ok((buckets, owners))
+    }
+
+    /// All physical file ids that are orphaned: NO active user_files reference.
+    /// Used by the admin "delete all" action.
     pub async fn orphaned_file_ids(pool: &PgPool) -> AppResult<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
-            r#"SELECT DISTINCT f.id
+            r#"SELECT f.id
                FROM files f
-               WHERE EXISTS (
-                   SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NOT NULL
-               )
-               AND NOT EXISTS (
+               WHERE NOT EXISTS (
                    SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NULL
                )"#,
         )
@@ -846,15 +1097,34 @@ impl UserFileRepository {
         Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
-    /// Whether a physical file is orphaned: it exists, has at least one
-    /// soft-deleted reference and NO active reference.
+    /// Whether a physical file is orphaned: it has NO active reference
+    /// (every reference soft-deleted or permanently deleted).
+    /// Display name for an orphaned physical file: its most recent
+    /// reference's original_name, or the physical record's own name when no
+    /// references remain. Used by the admin orphan download endpoint.
+    pub async fn orphan_display_name(pool: &PgPool, file_id: Uuid) -> AppResult<String> {
+        let row: Option<(String,)> = sqlx::query_as(
+            r#"SELECT COALESCE(lr.original_name, f.original_name)
+               FROM files f
+               LEFT JOIN LATERAL (
+                   SELECT uf.original_name FROM user_files uf
+                   WHERE uf.file_id = f.id
+                   ORDER BY uf.deleted_at DESC NULLS LAST, uf.created_at DESC
+                   LIMIT 1
+               ) lr ON true
+               WHERE f.id = $1"#,
+        )
+        .bind(file_id.to_string())
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to resolve orphan name: {e}")))?;
+        Ok(row.map(|(n,)| n).unwrap_or_else(|| "download".into()))
+    }
+
     pub async fn is_orphaned_file(pool: &PgPool, file_id: Uuid) -> AppResult<bool> {
-        let row: (bool, bool) = sqlx::query_as(
-            r#"SELECT EXISTS (
+        let row: (bool,) = sqlx::query_as(
+            r#"SELECT NOT EXISTS (
                    SELECT 1 FROM user_files uf WHERE uf.file_id = $1 AND uf.deleted_at IS NULL
-               ),
-               EXISTS (
-                   SELECT 1 FROM user_files uf WHERE uf.file_id = $1 AND uf.deleted_at IS NOT NULL
                )"#,
         )
         .bind(file_id.to_string())
@@ -862,7 +1132,7 @@ impl UserFileRepository {
         .await
         .map_err(|e| AppError::Internal(format!("failed to check orphaned status: {e}")))?;
 
-        Ok(!row.0 && row.1)
+        Ok(row.0)
     }
 
     /// Hard-delete every user_files row referencing a file (used when purging
@@ -878,34 +1148,40 @@ impl UserFileRepository {
     }
 
     /// One page of orphaned physical files for the admin UI. For each file the
-    /// most recently deleted reference is used to show name, bucket, owner and
-    /// when it became unreachable.
+    /// most recent reference is used to show name, bucket, owner and when it
+    /// became unreachable; files with no references left fall back to the
+    /// physical record's own name with null bucket/owner/date.
     pub async fn orphaned_files_page(
         pool: &PgPool,
         limit: i64,
         offset: i64,
+        bucket: Option<&str>,
+        owner_id: Option<&str>,
     ) -> AppResult<Vec<OrphanedFileRow>> {
         let rows = sqlx::query_as::<_, OrphanedFileRow>(
-            r#"SELECT f.id AS file_id, f.blake3_hash, last_ref.original_name, f.size,
-                      f.created_at, last_ref.bucket_name, last_ref.deleted_at, u.username
+            r#"SELECT f.id AS file_id, f.blake3_hash,
+                      COALESCE(lr.original_name, f.original_name) AS original_name,
+                      f.size, f.created_at,
+                      lr.bucket_name AS bucket_name, lr.deleted_at, u.username
                FROM files f
-               JOIN LATERAL (
+               LEFT JOIN LATERAL (
                    SELECT uf.original_name, uf.bucket_name, uf.deleted_at, uf.user_id
                    FROM user_files uf
-                   WHERE uf.file_id = f.id AND uf.deleted_at IS NOT NULL
-                   ORDER BY uf.deleted_at DESC
+                   WHERE uf.file_id = f.id
+                   ORDER BY uf.deleted_at DESC NULLS LAST, uf.created_at DESC
                    LIMIT 1
-               ) last_ref ON true
-               LEFT JOIN users u ON u.id = last_ref.user_id
-               WHERE EXISTS (
-                   SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NOT NULL
+               ) lr ON true
+               LEFT JOIN users u ON u.id = lr.user_id
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM user_files uf2 WHERE uf2.file_id = f.id AND uf2.deleted_at IS NULL
                )
-               AND NOT EXISTS (
-                   SELECT 1 FROM user_files uf WHERE uf.file_id = f.id AND uf.deleted_at IS NULL
-               )
-               ORDER BY last_ref.deleted_at DESC
-               LIMIT $1 OFFSET $2"#,
+               AND ($1 IS NULL OR lr.bucket_name = $1)
+               AND ($2 IS NULL OR lr.user_id = $2)
+               ORDER BY COALESCE(lr.deleted_at, f.created_at) DESC
+               LIMIT $3 OFFSET $4"#,
         )
+        .bind(bucket)
+        .bind(owner_id)
         .bind(limit)
         .bind(offset)
         .fetch_all(pool)

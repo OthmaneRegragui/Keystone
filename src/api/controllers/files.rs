@@ -858,9 +858,15 @@ pub async fn delete_file(
         }
     }
 
-    // Soft-delete: mark the file as deleted but keep it in the database.
-    // Physical file and storage quota are NOT affected — only permanent delete does that.
+    // Soft-delete: mark the file as deleted and release storage quota.
+    // The file remains in the trash bin until the user permanently deletes it.
     UserFileRepository::delete(state.db.pool(), user_file.id).await?;
+
+    // Release the file's size from the user's storage quota so they can
+    // re-upload immediately. Re-charging happens on restore.
+    if let Ok(Some(file)) = FileRepository::find_by_id(state.db.pool(), user_file.file_id).await {
+        let _ = UserRepository::release_storage(state.db.pool(), auth_user.user_id, file.size).await;
+    }
 
     Ok(Json(MessageResponse {
         message: format!("file '{}' deleted", user_file.original_name),
@@ -1585,9 +1591,15 @@ pub async fn batch_delete(
                     continue;
                 }
 
-                // Soft-delete only: mark as deleted, keep physical file and storage quota
+                // Soft-delete: mark as deleted, release storage quota
                 match UserFileRepository::delete(state.db.pool(), uf.id).await {
-                    Ok(true) => success += 1,
+                    Ok(true) => {
+                        // Release storage quota for the deleted file
+                        if let Ok(Some(f)) = FileRepository::find_by_id(state.db.pool(), uf.file_id).await {
+                            let _ = UserRepository::release_storage(state.db.pool(), auth_user.user_id, f.size).await;
+                        }
+                        success += 1
+                    }
                     _ => { failed += 1; errors.push(format!("{}: delete failed", uf.original_name)); }
                 }
             }
@@ -1596,6 +1608,342 @@ pub async fn batch_delete(
     }
 
     Ok(Json(BatchResultResponse { success, failed, errors }))
+}
+
+// ── Trash ──
+
+/// List the current user's trashed folders and files (with hierarchy preserved).
+pub async fn list_trash(
+    State(state): State<Arc<AppState>>,
+    auth_user: AuthUser,
+) -> AppResult<Json<TrashListDto>> {
+    auth_user.require_scope("files:read")?;
+
+    // All trashed folders for this user
+    let trashed_folders = FolderRepository::list_trashed_by_user(state.db.pool(), auth_user.user_id).await?;
+    let folders: Vec<TrashFolderDto> = trashed_folders
+        .into_iter()
+        .map(|f| TrashFolderDto {
+            folder_id: f.id,
+            name: f.name,
+            parent_id: f.parent_id,
+            bucket_name: f.bucket_name,
+            deleted_at: f.deleted_at.unwrap_or_else(chrono::Utc::now),
+        })
+        .collect();
+
+    // All trashed files for this user (includes files deleted individually
+    // AND files deleted as part of a folder deletion).
+    let (rows, _total) = UserFileRepository::list_trashed_by_user(
+        state.db.pool(),
+        auth_user.user_id,
+        0,
+        10000,
+    )
+    .await?;
+
+    let files: Vec<TrashFileDto> = rows
+        .into_iter()
+        .map(|(uf, hash, size)| TrashFileDto {
+            user_file_id: uf.id,
+            name: uf.original_name,
+            hash,
+            size,
+            mime_type: uf.mime_type,
+            deleted_at: uf.deleted_at.unwrap_or_else(chrono::Utc::now),
+            bucket_name: uf.bucket_name,
+            folder_id: uf.folder_id,
+        })
+        .collect();
+
+    Ok(Json(TrashListDto { folders, files }))
+}
+
+/// Restore a file from the trash bin. Optionally specify a destination folder_id
+/// within the same bucket (None = restore to original location).
+pub async fn restore_trash_file(
+    State(state): State<Arc<AppState>>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<RestoreTrashRequest>,
+) -> AppResult<Json<MessageResponse>> {
+    auth_user.require_scope("files:write")?;
+
+    let user_file = UserFileRepository::find_trashed_by_user_and_id(state.db.pool(), auth_user.user_id, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("file not found in trash".into()))?;
+
+    // If a destination folder is specified, verify it exists and belongs to the same bucket
+    if let Some(dest_folder_id) = body.folder_id {
+        let dest_folder = FolderRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, dest_folder_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("destination folder not found".into()))?;
+
+        // Ensure the folder is in the same bucket as the file
+        if dest_folder.bucket_name != user_file.bucket_name.as_deref().unwrap_or("default") {
+            return Err(AppError::BadRequest(
+                "destination folder must be in the same bucket as the file".into(),
+            ));
+        }
+
+        // Move the file to the new folder
+        UserFileRepository::restore_to_folder(state.db.pool(), user_file.id, Some(dest_folder_id)).await?;
+    } else {
+        // Restore to original location (may have an orphaned folder_id — that's OK,
+        // the file will appear at bucket root if the original folder was also deleted)
+        UserFileRepository::restore(state.db.pool(), user_file.id).await?;
+    }
+
+    // Re-charge storage quota
+    let file = FileRepository::find_by_id(state.db.pool(), user_file.file_id)
+        .await?
+        .ok_or_else(|| AppError::Internal("physical file not found after restore".into()))?;
+    let _ = UserRepository::charge_storage(state.db.pool(), auth_user.user_id, file.size).await;
+
+    Ok(Json(MessageResponse {
+        message: format!("file '{}' restored", user_file.original_name),
+    }))
+}
+
+/// Restore a folder from the trash bin (and all its trashed children).
+/// Optionally specify a new parent folder_id within the same bucket.
+pub async fn restore_trash_folder(
+    State(state): State<Arc<AppState>>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<RestoreTrashRequest>,
+) -> AppResult<Json<MessageResponse>> {
+    auth_user.require_scope("files:write")?;
+
+    let folder = FolderRepository::find_trashed_by_user_and_id(state.db.pool(), auth_user.user_id, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("folder not found in trash".into()))?;
+
+    // If a destination parent is specified, verify it's in the same bucket
+    if let Some(dest_parent_id) = body.folder_id {
+        let dest_folder = FolderRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, dest_parent_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("destination folder not found".into()))?;
+
+        if dest_folder.bucket_name != folder.bucket_name {
+            return Err(AppError::BadRequest(
+                "destination folder must be in the same bucket".into(),
+            ));
+        }
+    }
+
+    // Restore the folder itself
+    FolderRepository::restore(state.db.pool(), folder.id).await?;
+
+    // Optionally move to a new parent
+    if let Some(dest_parent_id) = body.folder_id {
+        FolderRepository::move_folder(state.db.pool(), folder.id, Some(dest_parent_id)).await?;
+    }
+
+    // Restore all descendant trashed folders (recursive)
+    restore_descendant_folders(state.db.pool(), &folder).await?;
+
+    // Restore all trashed files that were in this folder tree
+    restore_files_in_folder_tree(state.db.pool(), auth_user.user_id, &folder).await?;
+
+    // Re-charge storage for ALL restored files in the tree (every level),
+    // mirroring what delete_folder released when the folder was trashed.
+    let total_size: i64 = sqlx::query_as::<_, (i64,)>(
+        r#"SELECT COALESCE(SUM(f.size), 0)::BIGINT
+           FROM user_files uf
+           JOIN files f ON uf.file_id = f.id
+           WHERE uf.user_id = $1 AND uf.deleted_at IS NULL
+             AND uf.folder_id IN (
+               WITH RECURSIVE tree(id) AS (
+                 SELECT id FROM user_folders WHERE id = $2
+                 UNION ALL
+                 SELECT uf2.id FROM user_folders uf2
+                 INNER JOIN tree t ON uf2.parent_id = t.id
+               )
+               SELECT id FROM tree
+             )"#,
+    )
+    .bind(auth_user.user_id.to_string())
+    .bind(folder.id.to_string())
+    .fetch_one(state.db.pool())
+    .await
+    .map(|(size,)| size)
+    .unwrap_or(0);
+
+    if total_size > 0 {
+        let _ = UserRepository::charge_storage(state.db.pool(), auth_user.user_id, total_size).await;
+    }
+
+    Ok(Json(MessageResponse {
+        message: format!("folder '{}' and its contents restored", folder.name),
+    }))
+}
+
+/// Recursively restore all descendant trashed folders of a given folder.
+async fn restore_descendant_folders(
+    pool: &sqlx::PgPool,
+    folder: &crate::models::UserFolder,
+) -> AppResult<()> {
+    // Find all direct child folders that are trashed
+    let child_rows: Vec<crate::db::rows::folder_row::FolderRow> = sqlx::query_as(
+        "SELECT * FROM user_folders WHERE parent_id = $1 AND deleted_at IS NOT NULL",
+    )
+    .bind(folder.id.to_string())
+    .fetch_all(pool)
+    .await
+    .map_err(|e| AppError::Internal(format!("failed to query trashed child folders: {e}")))?;
+
+    for row in child_rows {
+        let child = crate::models::UserFolder::from(row);
+        FolderRepository::restore(pool, child.id).await?;
+        Box::pin(restore_descendant_folders(pool, &child)).await?;
+    }
+
+    Ok(())
+}
+
+/// Restore all soft-deleted files that belong to a folder tree.
+async fn restore_files_in_folder_tree(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    folder: &crate::models::UserFolder,
+) -> AppResult<()> {
+    // Collect all descendant folder IDs (including the folder itself)
+    let all_folder_ids: Vec<(String,)> = sqlx::query_as(
+        r#"WITH RECURSIVE tree(id) AS (
+               SELECT id FROM user_folders WHERE id = $1
+               UNION ALL
+               SELECT uf.id FROM user_folders uf
+               INNER JOIN tree t ON uf.parent_id = t.id
+           )
+           SELECT id FROM tree"#,
+    )
+    .bind(folder.id.to_string())
+    .fetch_all(pool)
+    .await
+    .map_err(|e| AppError::Internal(format!("failed to collect folder tree: {e}")))?;
+
+    if all_folder_ids.is_empty() {
+        return Ok(());
+    }
+
+    let folder_id_strs: Vec<String> = all_folder_ids.iter().map(|(id,)| id.clone()).collect();
+    let placeholders: Vec<String> = folder_id_strs
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("${}", i + 2))
+        .collect();
+    let sql = format!(
+        "UPDATE user_files SET deleted_at = NULL WHERE user_id = $1 AND folder_id IN ({}) AND deleted_at IS NOT NULL",
+        placeholders.join(", ")
+    );
+    let mut query = sqlx::query(&sql).bind(user_id.to_string());
+    for fid in &folder_id_strs {
+        query = query.bind(fid);
+    }
+    let _ = query
+        .execute(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to restore files in folder tree: {e}")))?;
+
+    Ok(())
+}
+
+/// Permanently delete a file from the trash bin (hard-delete the user_files row).
+pub async fn permanent_delete_trash_file(
+    State(state): State<Arc<AppState>>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<MessageResponse>> {
+    auth_user.require_scope("files:delete")?;
+    auth_user.require_bot_capability(BotCapability::Delete)?;
+
+    let user_file = UserFileRepository::find_trashed_by_user_and_id(state.db.pool(), auth_user.user_id, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("file not found in trash".into()))?;
+
+    // Keep a tombstone row (purged_at) so the physical file stays
+    // attributable in the admin orphans view; the entry leaves the trash.
+    UserFileRepository::mark_purged(state.db.pool(), user_file.id).await?;
+    FileRepository::update_ref_count(state.db.pool(), user_file.file_id, -1).await?;
+
+    Ok(Json(MessageResponse {
+        message: format!("file '{}' permanently deleted", user_file.original_name),
+    }))
+}
+
+/// Permanently delete a folder from the trash (hard-delete all trashed descendants first, then the folder).
+pub async fn permanent_delete_trash_folder(
+    State(state): State<Arc<AppState>>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<MessageResponse>> {
+    auth_user.require_scope("files:delete")?;
+    auth_user.require_bot_capability(BotCapability::Delete)?;
+
+    let folder = FolderRepository::find_trashed_by_user_and_id(state.db.pool(), auth_user.user_id, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("folder not found in trash".into()))?;
+
+    // Collect all descendant folder IDs (including the folder itself)
+    let all_folder_ids: Vec<(String,)> = sqlx::query_as(
+        r#"WITH RECURSIVE tree(id) AS (
+               SELECT id FROM user_folders WHERE id = $1 AND deleted_at IS NOT NULL
+               UNION ALL
+               SELECT uf.id FROM user_folders uf
+               INNER JOIN tree t ON uf.parent_id = t.id
+               WHERE uf.deleted_at IS NOT NULL
+           )
+           SELECT id FROM tree"#,
+    )
+    .bind(id.to_string())
+    .fetch_all(state.db.pool())
+    .await
+    .map_err(|e| AppError::Internal(format!("failed to collect folder tree: {e}")))?;
+
+    if all_folder_ids.is_empty() {
+        return Err(AppError::NotFound("folder not found in trash".into()));
+    }
+
+    let folder_id_strs: Vec<String> = all_folder_ids.iter().map(|(id,)| id.clone()).collect();
+
+    // Tombstone all trashed files in the folder tree and decrement ref_counts
+    let purged_files = UserFileRepository::mark_purged_in_folders(
+        state.db.pool(),
+        auth_user.user_id,
+        &folder_id_strs,
+    )
+    .await?;
+
+    for file_id_str in &purged_files {
+        if let Ok(file_id) = Uuid::parse_str(file_id_str) {
+            let _ = FileRepository::update_ref_count(state.db.pool(), file_id, -1).await;
+        }
+    }
+
+    // Hard-delete all folders in the tree
+    FolderRepository::hard_delete(state.db.pool(), folder.id).await?;
+    // Hard-delete descendant folders
+    if folder_id_strs.len() > 1 {
+        let descendant_placeholders: Vec<String> = folder_id_strs[1..]
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("${}", i + 1))
+            .collect();
+        let del_sql = format!(
+            "DELETE FROM user_folders WHERE id IN ({}) AND deleted_at IS NOT NULL",
+            descendant_placeholders.join(", ")
+        );
+        let mut del_query = sqlx::query(&del_sql);
+        for fid in &folder_id_strs[1..] {
+            del_query = del_query.bind(fid);
+        }
+        let _ = del_query.execute(state.db.pool()).await;
+    }
+
+    Ok(Json(MessageResponse {
+        message: format!("folder '{}' and its contents permanently deleted", folder.name),
+    }))
 }
 
 // ── Folder CRUD ──
@@ -1950,7 +2298,36 @@ pub async fn delete_folder(
         )));
     }
 
+    // Calculate total size of files in this folder (and descendants) before
+    // deleting, so we can release storage quota.
+    let total_size: i64 = sqlx::query_as::<_, (i64,)>(
+        r#"SELECT COALESCE(SUM(f.size), 0)::BIGINT
+           FROM user_files uf
+           JOIN files f ON uf.file_id = f.id
+           WHERE uf.user_id = $1 AND uf.deleted_at IS NULL
+             AND uf.folder_id IN (
+               WITH RECURSIVE tree(id) AS (
+                 SELECT id FROM user_folders WHERE id = $2
+                 UNION ALL
+                 SELECT uf2.id FROM user_folders uf2
+                 INNER JOIN tree t ON uf2.parent_id = t.id
+               )
+               SELECT id FROM tree
+             )"#,
+    )
+    .bind(auth_user.user_id.to_string())
+    .bind(id.to_string())
+    .fetch_one(state.db.pool())
+    .await
+    .map(|(size,)| size)
+    .unwrap_or(0);
+
     FolderRepository::delete(state.db.pool(), folder.id).await?;
+
+    // Release storage quota for all files soft-deleted by the folder delete
+    if total_size > 0 {
+        let _ = UserRepository::release_storage(state.db.pool(), auth_user.user_id, total_size).await;
+    }
 
     Ok(Json(MessageResponse {
         message: format!("folder '{}' deleted", folder.name),

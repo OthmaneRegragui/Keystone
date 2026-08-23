@@ -181,3 +181,40 @@ pub struct FolderResolveDto {
 pub struct MoveFolderRequest {
     pub folder_id: Option<Uuid>,
 }
+
+// ── Trash DTOs ──
+
+/// A trashed folder entry.
+#[derive(Debug, Serialize)]
+pub struct TrashFolderDto {
+    pub folder_id: Uuid,
+    pub name: String,
+    pub parent_id: Option<Uuid>,
+    pub bucket_name: String,
+    pub deleted_at: DateTime<Utc>,
+}
+
+/// A trashed file entry.
+#[derive(Debug, Serialize)]
+pub struct TrashFileDto {
+    pub user_file_id: Uuid,
+    pub name: String,
+    pub hash: String,
+    pub size: i64,
+    pub mime_type: Option<String>,
+    pub deleted_at: DateTime<Utc>,
+    pub bucket_name: Option<String>,
+    pub folder_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TrashListDto {
+    pub folders: Vec<TrashFolderDto>,
+    pub files: Vec<TrashFileDto>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RestoreTrashRequest {
+    /// Optional destination folder_id within the same bucket. None = restore to original location.
+    pub folder_id: Option<Uuid>,
+}

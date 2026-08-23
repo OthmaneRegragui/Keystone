@@ -14,6 +14,8 @@ pub struct UserFileRow {
     pub bucket_name: Option<String>,
     pub folder_id: Option<String>,
     pub deleted_at: Option<String>,
+    #[sqlx(default)]
+    pub purged_at: Option<String>,
 }
 
 impl From<UserFileRow> for UserFile {

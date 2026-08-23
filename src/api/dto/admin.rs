@@ -232,6 +232,20 @@ pub struct OrphanedFilesDto {
     pub files: Vec<OrphanedFileDto>,
 }
 
+/// A distinct owner (user) among orphaned files, for filter dropdowns.
+#[derive(Debug, Serialize)]
+pub struct OrphanedOwnerDto {
+    pub id: String,
+    pub username: String,
+}
+
+/// Distinct buckets and owners among orphaned files, for filter dropdowns.
+#[derive(Debug, Serialize)]
+pub struct OrphanedFacetsDto {
+    pub buckets: Vec<String>,
+    pub users: Vec<OrphanedOwnerDto>,
+}
+
 /// Result of purging orphaned physical files.
 #[derive(Debug, Serialize)]
 pub struct OrphanedDeleteResultDto {

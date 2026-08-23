@@ -7,42 +7,17 @@
     <link rel="icon" type="image/svg+xml" href="/logo.svg">
     <script defer src="/static/vendor/alpine.min.js"></script>
     <script src="/static/vendor/tailwind.min.js"></script>
-    <style>
-        @media (prefers-color-scheme: dark) {
-            :root { color-scheme: dark; }
-            body { background-color: #131316 !important; }
-            .bg-gray-50 { background-color: #131316 !important; }
-            .bg-white { background-color: #1a1a1f !important; }
-            .bg-gray-100 { background-color: #202027 !important; }
-            .bg-gray-200 { background-color: #26262e !important; }
-            .bg-gray-300 { background-color: #303038 !important; }
-            .bg-indigo-50 { background-color: #2b2b3d !important; }
-            .bg-indigo-50\/30 { background-color: rgba(43, 43, 61, 0.6) !important; }
-            .bg-indigo-100 { background-color: #35354a !important; }
-            .file\:bg-indigo-50 { background-color: #2b2b3d !important; }
-            .file\:text-indigo-700 { color: #a5b4fc !important; }
-            .text-gray-900 { color: #e8e8ea !important; }
-            .text-gray-800 { color: #d6d6da !important; }
-            .text-gray-700 { color: #c2c2c8 !important; }
-            .text-gray-600 { color: #a3a3ac !important; }
-            .text-gray-500 { color: #83838d !important; }
-            .text-gray-400 { color: #63636e !important; }
-            .text-gray-300 { color: #4c4c56 !important; }
-            .text-indigo-600, .text-indigo-500 { color: #a5b4fc !important; }
-            .text-indigo-700 { color: #93a0f7 !important; }
-            .text-indigo-800 { color: #b1c0ff !important; }
-            .text-red-600 { color: #f87171 !important; }
-            .text-green-600 { color: #4ade80 !important; }
-            .border-gray-100 { border-color: #232329 !important; }
-            .border-gray-200 { border-color: #2d2d34 !important; }
-            .border-gray-300 { border-color: #3b3b45 !important; }
-            .border-gray-400 { border-color: #4b4b57 !important; }
-            .border-indigo-200 { border-color: #3c3c55 !important; }
-            .placeholder-gray-400::placeholder { color: #63636e !important; }
-            .hover\:bg-gray-50:hover { background-color: #202027 !important; }
-            .hover\:bg-red-50:hover { background-color: rgba(127, 29, 29, 0.35) !important; }
-        }
-    </style>
+    <script>
+        // Theme boot: respect the user's in-app choice; fall back to OS preference.
+        (function() {
+            var t = null;
+            try { t = localStorage.getItem('theme'); } catch (e) {}
+            if (t === 'dark' || (!t && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+                document.documentElement.classList.add('dark');
+            }
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/app-theme.css?v=__KEYSTONE_VERSION__">
     <script>
         (function() { var t = null; try { t = localStorage.getItem('token'); } catch (e) {} if (t) window.location.href = '/'; })();
         function submitRegister(e) {

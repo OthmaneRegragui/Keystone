@@ -51,10 +51,10 @@ impl FolderRepository {
             .ok_or_else(|| AppError::Internal("folder not found after insert".to_string()))
     }
 
-    /// Find a folder by ID, ensuring it belongs to the given user.
+    /// Find a folder by ID, excluding soft-deleted folders.
     pub async fn find_by_id(pool: &PgPool, id: Uuid) -> AppResult<Option<UserFolder>> {
         let row = sqlx::query_as::<_, FolderRow>(
-            "SELECT * FROM user_folders WHERE id = $1",
+            "SELECT * FROM user_folders WHERE id = $1 AND deleted_at IS NULL",
         )
         .bind(id.to_string())
         .fetch_optional(pool)
@@ -64,14 +64,14 @@ impl FolderRepository {
         Ok(row.map(UserFolder::from))
     }
 
-    /// Find a folder by user + id (ownership check).
+    /// Find a folder by user + id (ownership check), excluding soft-deleted.
     pub async fn find_by_user_and_id(
         pool: &PgPool,
         user_id: Uuid,
         folder_id: Uuid,
     ) -> AppResult<Option<UserFolder>> {
         let row = sqlx::query_as::<_, FolderRow>(
-            "SELECT * FROM user_folders WHERE user_id = $1 AND id = $2",
+            "SELECT * FROM user_folders WHERE user_id = $1 AND id = $2 AND deleted_at IS NULL",
         )
         .bind(user_id.to_string())
         .bind(folder_id.to_string())
@@ -82,7 +82,7 @@ impl FolderRepository {
         Ok(row.map(UserFolder::from))
     }
 
-    /// List direct child folders of a parent folder in a bucket.
+    /// List direct child folders of a parent folder in a bucket (excluding deleted).
     /// parent_id = None means root level.
     pub async fn list_children(
         pool: &PgPool,
@@ -93,7 +93,7 @@ impl FolderRepository {
         let rows: Vec<FolderRow> = match parent_id {
             Some(pid) => {
                 sqlx::query_as(
-                    "SELECT * FROM user_folders WHERE user_id = $1 AND bucket_name = $2 AND parent_id = $3 ORDER BY name ASC",
+                    "SELECT * FROM user_folders WHERE user_id = $1 AND bucket_name = $2 AND parent_id = $3 AND deleted_at IS NULL ORDER BY name ASC",
                 )
                 .bind(user_id.to_string())
                 .bind(bucket_name)
@@ -103,7 +103,7 @@ impl FolderRepository {
             }
             None => {
                 sqlx::query_as(
-                    "SELECT * FROM user_folders WHERE user_id = $1 AND bucket_name = $2 AND parent_id IS NULL ORDER BY name ASC",
+                    "SELECT * FROM user_folders WHERE user_id = $1 AND bucket_name = $2 AND parent_id IS NULL AND deleted_at IS NULL ORDER BY name ASC",
                 )
                 .bind(user_id.to_string())
                 .bind(bucket_name)
@@ -134,15 +134,17 @@ impl FolderRepository {
         Ok(affected > 0)
     }
 
-    /// Delete a folder AND all its contents recursively (subfolders + files are deleted).
+    /// Soft-delete a folder AND all its contents recursively.
+    /// Folders are soft-deleted (kept in trash for restore); files are soft-deleted too.
     pub async fn delete(pool: &PgPool, id: Uuid) -> AppResult<bool> {
         // 1. Collect all descendant folder IDs (including the folder itself) via recursive CTE
         let all_folder_ids: Vec<(String,)> = sqlx::query_as(
             r#"WITH RECURSIVE tree(id) AS (
-                   SELECT id FROM user_folders WHERE id = $1
+                   SELECT id FROM user_folders WHERE id = $1 AND deleted_at IS NULL
                    UNION ALL
                    SELECT uf.id FROM user_folders uf
                    INNER JOIN tree t ON uf.parent_id = t.id
+                   WHERE uf.deleted_at IS NULL
                )
                SELECT id FROM tree"#,
         )
@@ -155,10 +157,6 @@ impl FolderRepository {
             return Ok(false);
         }
 
-        // 2. Soft-delete ALL files in those folders (set deleted_at = now), then
-        // hard-delete the folders themselves. Both run in one transaction so a
-        // mid-way failure cannot leave files soft-deleted but folders kept (or
-        // the reverse).
         let mut tx = pool
             .begin()
             .await
@@ -167,9 +165,7 @@ impl FolderRepository {
         let now = chrono::Utc::now().to_rfc3339();
         let folder_id_strs: Vec<String> = all_folder_ids.iter().map(|(id,)| id.clone()).collect();
 
-        // The file soft-delete binds `now` as $1, so the folder ids must occupy
-        // $2..$N (a placeholder list starting at $1 would compare `folder_id`
-        // against the timestamp and silently drop the last folder id).
+        // 2. Soft-delete ALL files in those folders
         let file_placeholders: Vec<String> = folder_id_strs
             .iter()
             .enumerate()
@@ -188,25 +184,24 @@ impl FolderRepository {
             .await
             .map_err(|e| AppError::Internal(format!("failed to soft-delete files in folder tree: {e}")))?;
 
-        // 3. Hard-delete all folders in the tree (deepest first via the CTE).
-        // No `now` bound here, so the ids start at $1.
+        // 3. Soft-delete all folders in the tree (set deleted_at instead of DELETE)
         let folder_placeholders: Vec<String> = folder_id_strs
             .iter()
             .enumerate()
-            .map(|(i, _)| format!("${}", i + 1))
+            .map(|(i, _)| format!("${}", i + 2))
             .collect();
-        let del_query = format!(
-            "DELETE FROM user_folders WHERE id IN ({})",
+        let del_sql = format!(
+            "UPDATE user_folders SET deleted_at = $1 WHERE id IN ({}) AND deleted_at IS NULL",
             folder_placeholders.join(", ")
         );
-        let mut query = sqlx::query(&del_query);
+        let mut query = sqlx::query(&del_sql).bind(&now);
         for fid in &folder_id_strs {
             query = query.bind(fid);
         }
         let affected = query
             .execute(&mut *tx)
             .await
-            .map_err(|e| AppError::Internal(format!("failed to delete folder tree: {e}")))?
+            .map_err(|e| AppError::Internal(format!("failed to soft-delete folder tree: {e}")))?
             .rows_affected();
 
         tx.commit()
@@ -216,14 +211,14 @@ impl FolderRepository {
         Ok(affected > 0)
     }
 
-    /// List all folders in a bucket for a user (flat list for building client-side tree).
+    /// List all folders in a bucket for a user (flat list, excluding deleted).
     pub async fn list_all_for_bucket(
         pool: &PgPool,
         user_id: Uuid,
         bucket_name: &str,
     ) -> AppResult<Vec<UserFolder>> {
         let rows: Vec<FolderRow> = sqlx::query_as(
-            "SELECT * FROM user_folders WHERE user_id = $1 AND bucket_name = $2 ORDER BY name ASC",
+            "SELECT * FROM user_folders WHERE user_id = $1 AND bucket_name = $2 AND deleted_at IS NULL ORDER BY name ASC",
         )
         .bind(user_id.to_string())
         .bind(bucket_name)
@@ -267,10 +262,10 @@ impl FolderRepository {
         Ok(result.0)
     }
 
-    /// Count subfolders directly in a folder.
+    /// Count subfolders directly in a folder (excluding deleted).
     pub async fn count_subfolders(pool: &PgPool, folder_id: Uuid) -> AppResult<i64> {
         let result: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM user_folders WHERE parent_id = $1",
+            "SELECT COUNT(*) FROM user_folders WHERE parent_id = $1 AND deleted_at IS NULL",
         )
         .bind(folder_id.to_string())
         .fetch_one(pool)
@@ -333,7 +328,7 @@ impl FolderRepository {
             let row: Option<FolderRow> = sqlx::query_as(
                 "SELECT * FROM user_folders
                  WHERE user_id = $1 AND bucket_name = $2 AND name = $3
-                 AND parent_id IS NOT DISTINCT FROM $4
+                 AND parent_id IS NOT DISTINCT FROM $4 AND deleted_at IS NULL
                  LIMIT 1",
             )
             .bind(user_id.to_string())
@@ -362,6 +357,70 @@ impl FolderRepository {
         full_path.extend(breadcrumb);
 
         Ok(Some((final_id, full_path)))
+    }
+
+    /// List all trashed (soft-deleted) folders for a user, ordered by deleted_at DESC.
+    pub async fn list_trashed_by_user(
+        pool: &PgPool,
+        user_id: Uuid,
+    ) -> AppResult<Vec<UserFolder>> {
+        let rows: Vec<FolderRow> = sqlx::query_as(
+            r#"SELECT * FROM user_folders
+               WHERE user_id = $1 AND deleted_at IS NOT NULL
+               ORDER BY deleted_at DESC"#,
+        )
+        .bind(user_id.to_string())
+        .fetch_all(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to list trashed folders: {e}")))?;
+
+        Ok(rows.into_iter().map(UserFolder::from).collect())
+    }
+
+    /// Find a trashed folder by user + id.
+    pub async fn find_trashed_by_user_and_id(
+        pool: &PgPool,
+        user_id: Uuid,
+        folder_id: Uuid,
+    ) -> AppResult<Option<UserFolder>> {
+        let row = sqlx::query_as::<_, FolderRow>(
+            "SELECT * FROM user_folders WHERE user_id = $1 AND id = $2 AND deleted_at IS NOT NULL",
+        )
+        .bind(user_id.to_string())
+        .bind(folder_id.to_string())
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to query trashed folder: {e}")))?;
+
+        Ok(row.map(UserFolder::from))
+    }
+
+    /// Restore a soft-deleted folder (set deleted_at back to NULL).
+    pub async fn restore(pool: &PgPool, id: Uuid) -> AppResult<bool> {
+        let affected = sqlx::query(
+            "UPDATE user_folders SET deleted_at = NULL WHERE id = $1 AND deleted_at IS NOT NULL",
+        )
+        .bind(id.to_string())
+        .execute(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to restore folder: {e}")))?
+        .rows_affected();
+
+        Ok(affected > 0)
+    }
+
+    /// Permanently delete a soft-deleted folder row.
+    pub async fn hard_delete(pool: &PgPool, id: Uuid) -> AppResult<bool> {
+        let affected = sqlx::query(
+            "DELETE FROM user_folders WHERE id = $1 AND deleted_at IS NOT NULL",
+        )
+        .bind(id.to_string())
+        .execute(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to hard-delete folder: {e}")))?
+        .rows_affected();
+
+        Ok(affected > 0)
     }
 
     /// Move a folder to a new parent (or root if None).
@@ -403,7 +462,7 @@ impl FolderRepository {
         let conflict = match new_parent_id {
             Some(pid) => {
                 sqlx::query_as::<_, FolderRow>(
-                    "SELECT * FROM user_folders WHERE user_id = $1 AND bucket_name = $2 AND parent_id = $3 AND name = $4 AND id != $5 LIMIT 1",
+                    "SELECT * FROM user_folders WHERE user_id = $1 AND bucket_name = $2 AND parent_id = $3 AND name = $4 AND id != $5 AND deleted_at IS NULL LIMIT 1",
                 )
                 .bind(folder.user_id.to_string())
                 .bind(&folder.bucket_name)
@@ -415,7 +474,7 @@ impl FolderRepository {
             }
             None => {
                 sqlx::query_as::<_, FolderRow>(
-                    "SELECT * FROM user_folders WHERE user_id = $1 AND bucket_name = $2 AND parent_id IS NULL AND name = $3 AND id != $4 LIMIT 1",
+                    "SELECT * FROM user_folders WHERE user_id = $1 AND bucket_name = $2 AND parent_id IS NULL AND name = $3 AND id != $4 AND deleted_at IS NULL LIMIT 1",
                 )
                 .bind(folder.user_id.to_string())
                 .bind(&folder.bucket_name)

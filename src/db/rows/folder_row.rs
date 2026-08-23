@@ -11,6 +11,7 @@ pub struct FolderRow {
     pub parent_id: Option<String>,
     pub name: String,
     pub created_at: String,
+    pub deleted_at: Option<String>,
 }
 
 impl From<FolderRow> for UserFolder {
@@ -24,6 +25,11 @@ impl From<FolderRow> for UserFolder {
             created_at: DateTime::parse_from_rfc3339(&row.created_at)
                 .expect("invalid datetime in database")
                 .with_timezone(&Utc),
+            deleted_at: row.deleted_at.map(|s| {
+                DateTime::parse_from_rfc3339(&s)
+                    .expect("invalid datetime in database")
+                    .with_timezone(&Utc)
+            }),
         }
     }
 }

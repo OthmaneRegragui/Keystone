@@ -79,6 +79,13 @@ pub fn api_routes() -> Router<Arc<AppState>> {
                     .route("/:id/move", axum::routing::post(crate::api::controllers::files::move_folder))
                     .route("/:id", axum::routing::delete(crate::api::controllers::files::delete_folder)),
                 )
+                .nest("/trash", axum::Router::new()
+                    .route("/", axum::routing::get(crate::api::controllers::files::list_trash))
+                    .route("/file/:id/restore", axum::routing::post(crate::api::controllers::files::restore_trash_file))
+                    .route("/file/:id", axum::routing::delete(crate::api::controllers::files::permanent_delete_trash_file))
+                    .route("/folder/:id/restore", axum::routing::post(crate::api::controllers::files::restore_trash_folder))
+                    .route("/folder/:id", axum::routing::delete(crate::api::controllers::files::permanent_delete_trash_folder)),
+                )
                 .nest("/health", axum::Router::new()
                     .route("/", axum::routing::get(crate::api::controllers::health::health))
                     .route("/ready", axum::routing::get(crate::api::controllers::health::ready)),
@@ -86,7 +93,9 @@ pub fn api_routes() -> Router<Arc<AppState>> {
                 .nest("/admin", axum::Router::new()
                     .route("/stats", axum::routing::get(crate::api::controllers::admin::get_stats))
                     .route("/orphaned-files", axum::routing::get(crate::api::controllers::admin::list_orphaned_files).delete(crate::api::controllers::admin::delete_all_orphaned_files))
+                    .route("/orphaned-files/facets", axum::routing::get(crate::api::controllers::admin::list_orphaned_file_facets))
                     .route("/orphaned-files/:id", axum::routing::delete(crate::api::controllers::admin::delete_orphaned_file))
+                    .route("/orphaned-files/:id/download", axum::routing::get(crate::api::controllers::admin::download_orphaned_file))
                     .route("/settings", axum::routing::get(crate::api::controllers::admin::get_settings))
                     .route("/settings", axum::routing::put(crate::api::controllers::admin::update_setting))
                     .route("/backends", axum::routing::get(crate::api::controllers::admin::list_storage_backends))

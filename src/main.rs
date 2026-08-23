@@ -32,11 +32,14 @@ const SETUP_HTML: &str = include_str!("static/setup.html");
 const DOCS_HTML: &str = include_str!("static/docs.html");
 const ORPHANS_HTML: &str = include_str!("static/orphans.html");
 const BOTS_HTML: &str = include_str!("static/bots.html");
+const TRASH_HTML: &str = include_str!("static/trash.html");
 
 // Vendored assets (self-hosted so the UI works fully offline — no CDN).
 const ALPINE_JS: &str = include_str!("static/vendor/alpine.min.js");
 const TAILWIND_JS: &str = include_str!("static/vendor/tailwind.min.js");
 const LOGO_SVG: &str = include_str!("static/logo.svg");
+// Shared theme stylesheet: single dark-mode palette for every page.
+const APP_THEME_CSS: &str = include_str!("static/app-theme.css");
 
 const KEYSTONE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -258,6 +261,14 @@ async fn ui_handler(
             LOGO_SVG,
         )
             .into_response(),
+        "/static/app-theme.css" => (
+            [
+                (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+                (header::CACHE_CONTROL, "public, max-age=86400"),
+            ],
+            APP_THEME_CSS,
+        )
+            .into_response(),
         "/auth/login" | "/login" => HtmlResponse(versioned(LOGIN_HTML)).into_response(),
         "/auth/register" | "/register" => {
             let blocked = AdminSettingRepository::get_bool(state.db.pool(), "block_registrations")
@@ -294,6 +305,7 @@ async fn ui_handler(
             match path {
                 "/" | "/dashboard" => HtmlResponse(versioned(DASHBOARD_HTML)).into_response(),
                 "/files" => HtmlResponse(versioned(FILES_HTML)).into_response(),
+                "/trash" => HtmlResponse(versioned(TRASH_HTML)).into_response(),
                 "/account" => HtmlResponse(versioned(ACCOUNT_HTML)).into_response(),
                 "/admin" => HtmlResponse(versioned(ADMIN_HTML)).into_response(),
                 "/docs" => admin_page(headers, &state, DOCS_HTML).await,

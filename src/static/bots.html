@@ -7,64 +7,7 @@
     <link rel="icon" type="image/svg+xml" href="/logo.svg">
     <script defer src="/static/vendor/alpine.min.js"></script>
     <script src="/static/vendor/tailwind.min.js"></script>
-    <style>
-        html:not(.dark) { color-scheme: light; }
-        html.dark { color-scheme: dark; }
-        html.dark body { background-color: #131316 !important; }
-        html.dark .bg-gray-50 { background-color: #131316 !important; }
-        html.dark .bg-white { background-color: #1a1a1f !important; }
-        html.dark .bg-gray-100 { background-color: #202027 !important; }
-        html.dark .bg-gray-200 { background-color: #26262e !important; }
-        html.dark .bg-gray-300 { background-color: #303038 !important; }
-        html.dark .text-gray-900 { color: #e8e8ea !important; }
-        html.dark .text-gray-800 { color: #d6d6da !important; }
-        html.dark .text-gray-700 { color: #c2c2c8 !important; }
-        html.dark .text-gray-600 { color: #a3a3ac !important; }
-        html.dark .text-gray-500 { color: #83838d !important; }
-        html.dark .text-gray-400 { color: #63636e !important; }
-        html.dark .text-gray-300 { color: #4c4c56 !important; }
-        html.dark .text-indigo-600, html.dark .text-indigo-500 { color: #a5b4fc !important; }
-        html.dark .text-indigo-700 { color: #93a0f7 !important; }
-        html.dark .text-indigo-800 { color: #b1c0ff !important; }
-        html.dark .text-red-600 { color: #f87171 !important; }
-        html.dark .text-red-500 { color: #f87171 !important; }
-        html.dark .text-red-400 { color: #f87171 !important; }
-        html.dark .text-green-600 { color: #4ade80 !important; }
-        html.dark .text-amber-600 { color: #fbbf24 !important; }
-        html.dark .border-gray-100 { border-color: #232329 !important; }
-        html.dark .border-gray-200 { border-color: #2d2d34 !important; }
-        html.dark .border-gray-300 { border-color: #3b3b45 !important; }
-        html.dark .placeholder-gray-400::placeholder { color: #63636e !important; }
-        html.dark .hover\:bg-gray-50:hover { background-color: #202027 !important; }
-        html.dark .hover\:bg-gray-100:hover { background-color: #202027 !important; }
-        html.dark .hover\:bg-gray-200:hover { background-color: #26262e !important; }
-        html.dark .bg-blue-100 { background-color: #1e2b40 !important; }
-        html.dark .bg-green-100 { background-color: #1c3526 !important; }
-        html.dark .bg-red-100 { background-color: #3d2323 !important; }
-        html.dark .bg-purple-100 { background-color: #2b2040 !important; }
-        html.dark .bg-yellow-100 { background-color: #332b17 !important; }
-        html.dark .bg-orange-100 { background-color: #3a2415 !important; }
-        html.dark .bg-emerald-100 { background-color: #1c3526 !important; }
-        html.dark .text-blue-600 { color: #93c5fd !important; }
-        html.dark .text-blue-700 { color: #93c5fd !important; }
-        html.dark .text-green-600 { color: #4ade80 !important; }
-        html.dark .text-green-700 { color: #86efac !important; }
-        html.dark .text-purple-600 { color: #c4b5fd !important; }
-        html.dark .text-yellow-600 { color: #fbbf24 !important; }
-        html.dark .text-orange-600 { color: #fb923c !important; }
-        html.dark .text-emerald-700 { color: #86efac !important; }
-        html.dark [x-cloak] { display: none !important; }
-        html.dark input:not([type="checkbox"]):not([type="radio"]),
-        html.dark select {
-            background-color: #202027 !important;
-            border-color: #3b3b45 !important;
-            color: #e8e8ea !important;
-        }
-        html.dark input::placeholder,
-        html.dark textarea::placeholder { color: #63636e !important; }
-        html.dark select option { background-color: #1a1a1f !important; color: #e8e8ea !important; }
-        .no-select { user-select: none; }
-    </style>
+    <link rel="stylesheet" href="/static/app-theme.css?v=__KEYSTONE_VERSION__">
 </head>
 <body class="h-full bg-gray-50">
     <script>
@@ -466,6 +409,10 @@
                 <a href="/files" x-on:click="closeSidebar()" :class="active('/files') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
                     <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
                     Files
+                </a>
+                <a href="/trash" x-on:click="closeSidebar()" :class="active('/trash') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                    Trash
                 </a>
                 <a href="/account" x-on:click="closeSidebar()" :class="active('/account') ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-50'" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm">
                     <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>

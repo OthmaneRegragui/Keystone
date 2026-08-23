@@ -12,6 +12,7 @@ pub struct UserFolder {
     pub parent_id: Option<Uuid>,
     pub name: String,
     pub created_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 impl UserFolder {
@@ -23,6 +24,7 @@ impl UserFolder {
             parent_id,
             name,
             created_at: Utc::now(),
+            deleted_at: None,
         }
     }
 }
