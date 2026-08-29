@@ -39,6 +39,9 @@ pub async fn stats(
             ref_count,
             bucket_name: uf.bucket_name,
             folder_id: uf.folder_id,
+            is_shared: false,
+            shared_by_username: None,
+            shared_at: None,
         })
         .collect();
 

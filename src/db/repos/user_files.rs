@@ -587,6 +587,28 @@ impl UserFileRepository {
         Ok(rows.into_iter().map(|row| row.into_parts()).collect())
     }
 
+    /// List files in a folder without user scoping (for shared folder browsing).
+    pub async fn list_in_folder_unscoped(
+        pool: &PgPool,
+        folder_id: Uuid,
+    ) -> AppResult<Vec<(UserFile, String, i64, i32)>> {
+        let sql = r#"SELECT uf.id, uf.user_id, uf.file_id, uf.original_name, uf.mime_type, uf.created_at,
+                     uf.bucket_name, uf.folder_id, uf.deleted_at, uf.purged_at,
+                     f.blake3_hash, f.size, f.ref_count
+              FROM user_files uf
+              JOIN files f ON uf.file_id = f.id
+              WHERE uf.folder_id = $1 AND uf.deleted_at IS NULL
+              ORDER BY uf.original_name ASC"#;
+
+        let rows: Vec<UserFileWithMetaRow> = sqlx::query_as(sql)
+            .bind(folder_id.to_string())
+            .fetch_all(pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to list shared folder files: {e}")))?;
+
+        Ok(rows.into_iter().map(|row| row.into_parts()).collect())
+    }
+
     /// Count total files for a user with optional search, bucket, and folder filter.
     pub async fn count_by_user(
         pool: &PgPool,
@@ -1189,5 +1211,28 @@ impl UserFileRepository {
         .map_err(|e| AppError::Internal(format!("failed to list orphaned files: {e}")))?;
 
         Ok(rows)
+    }
+
+    /// List user_file IDs in the given folder IDs (for share cleanup on folder delete).
+    pub async fn list_ids_in_folders(pool: &PgPool, user_id: Uuid, folder_ids: &[String]) -> AppResult<Vec<String>> {
+        if folder_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders: Vec<String> = folder_ids.iter().enumerate().map(|(i, _)| format!("${}", i + 2)).collect();
+        let sql = format!(
+            "SELECT id::text FROM user_files WHERE user_id = $1 AND folder_id::text IN ({})",
+            placeholders.join(", ")
+        );
+        let mut query = sqlx::query_as::<_, (String,)>(&sql)
+            .bind(user_id.to_string());
+        for id in folder_ids {
+            query = query.bind(id);
+        }
+        let rows: Vec<(String,)> = query
+            .fetch_all(pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to list file ids in folders: {e}")))?;
+
+        Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 }

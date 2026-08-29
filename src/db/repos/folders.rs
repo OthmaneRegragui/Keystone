@@ -116,6 +116,33 @@ impl FolderRepository {
         Ok(rows.into_iter().map(UserFolder::from).collect())
     }
 
+    /// List child folders without user scoping (for shared folder browsing).
+    pub async fn list_children_unscoped(
+        pool: &PgPool,
+        parent_id: Option<Uuid>,
+    ) -> AppResult<Vec<UserFolder>> {
+        let rows: Vec<FolderRow> = match parent_id {
+            Some(pid) => {
+                sqlx::query_as(
+                    "SELECT * FROM user_folders WHERE parent_id = $1 AND deleted_at IS NULL ORDER BY name ASC",
+                )
+                .bind(pid.to_string())
+                .fetch_all(pool)
+                .await
+            }
+            None => {
+                sqlx::query_as(
+                    "SELECT * FROM user_folders WHERE parent_id IS NULL AND deleted_at IS NULL ORDER BY name ASC",
+                )
+                .fetch_all(pool)
+                .await
+            }
+        }
+        .map_err(|e| AppError::Internal(format!("failed to list folders: {e}")))?;
+
+        Ok(rows.into_iter().map(UserFolder::from).collect())
+    }
+
     /// Rename a folder.
     pub async fn update_name(pool: &PgPool, id: Uuid, new_name: &str) -> AppResult<bool> {
         let affected = sqlx::query("UPDATE user_folders SET name = $1 WHERE id = $2")
@@ -503,6 +530,26 @@ impl FolderRepository {
             .rows_affected();
 
         Ok(affected > 0)
+    }
+
+    /// List all descendant folder IDs (recursive) for share cleanup.
+    pub async fn list_descendant_ids(pool: &PgPool, folder_id: Uuid) -> AppResult<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            r#"WITH RECURSIVE tree(id) AS (
+                SELECT id::text FROM user_folders WHERE id = $1
+                UNION ALL
+                SELECT uf.id::text FROM user_folders uf
+                INNER JOIN tree t ON uf.parent_id::text = t.id
+            )
+            SELECT id FROM tree WHERE id != $2"#,
+        )
+        .bind(folder_id.to_string())
+        .bind(folder_id.to_string())
+        .fetch_all(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to list descendant folder ids: {e}")))?;
+
+        Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 }
 

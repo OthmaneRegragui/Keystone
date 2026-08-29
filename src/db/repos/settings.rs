@@ -63,11 +63,13 @@ impl AdminSettingRepository {
         let allow_user_api_keys = Self::get_bool(pool, "allow_user_api_keys").await?;
         let allow_user_bots = Self::get_bool(pool, "allow_user_bots").await?;
         let allow_user_password_change = Self::get_bool(pool, "allow_user_password_change").await?;
+        let allow_user_sharing = Self::get_bool(pool, "allow_user_sharing").await?;
         Ok(crate::models::PlatformSettings {
             block_registrations: block_reg,
             allow_user_api_keys,
             allow_user_bots,
             allow_user_password_change,
+            allow_user_sharing,
         })
     }
 }

@@ -33,6 +33,8 @@ const DOCS_HTML: &str = include_str!("static/docs.html");
 const ORPHANS_HTML: &str = include_str!("static/orphans.html");
 const BOTS_HTML: &str = include_str!("static/bots.html");
 const TRASH_HTML: &str = include_str!("static/trash.html");
+const SHARED_HTML: &str = include_str!("static/shared.html");
+const SIDEBAR_HTML: &str = include_str!("static/_sidebar.html");
 
 // Vendored assets (self-hosted so the UI works fully offline — no CDN).
 const ALPINE_JS: &str = include_str!("static/vendor/alpine.min.js");
@@ -306,6 +308,7 @@ async fn ui_handler(
                 "/" | "/dashboard" => HtmlResponse(versioned(DASHBOARD_HTML)).into_response(),
                 "/files" => HtmlResponse(versioned(FILES_HTML)).into_response(),
                 "/trash" => HtmlResponse(versioned(TRASH_HTML)).into_response(),
+                "/shared" => HtmlResponse(versioned(SHARED_HTML)).into_response(),
                 "/account" => HtmlResponse(versioned(ACCOUNT_HTML)).into_response(),
                 "/admin" => HtmlResponse(versioned(ADMIN_HTML)).into_response(),
                 "/docs" => admin_page(headers, &state, DOCS_HTML).await,
@@ -349,7 +352,8 @@ async fn admin_page(
 }
 
 fn versioned(html: &'static str) -> String {
-    html.replace("__KEYSTONE_VERSION__", KEYSTONE_VERSION)
+    html.replace("<!--SIDEBAR-->", SIDEBAR_HTML)
+        .replace("__KEYSTONE_VERSION__", KEYSTONE_VERSION)
 }
 
 impl IntoResponse for HtmlResponse {

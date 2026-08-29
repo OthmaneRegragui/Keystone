@@ -151,6 +151,7 @@ pub async fn get_group_detail(
         allow_api_keys: group.allow_api_keys,
         allow_password_change: group.allow_password_change,
         allow_bots: group.allow_bots,
+        allow_sharing: group.allow_sharing,
     }))
 }
 
@@ -299,10 +300,11 @@ pub async fn update_group_permissions(
         body.allow_api_keys,
         body.allow_password_change,
         body.allow_bots,
+        body.allow_sharing,
     ).await?;
     info!(
-        "admin {} updated group {} permissions: allow_api_keys={}, allow_password_change={}, allow_bots={}",
-        auth.username, body.group_id, body.allow_api_keys, body.allow_password_change, body.allow_bots
+        "admin {} updated group {} permissions: allow_api_keys={}, allow_password_change={}, allow_bots={}, allow_sharing={}",
+        auth.username, body.group_id, body.allow_api_keys, body.allow_password_change, body.allow_bots, body.allow_sharing
     );
     Ok(Json(MessageResponse { message: "group permissions updated".to_string() }))
 }

@@ -86,6 +86,16 @@ pub fn api_routes() -> Router<Arc<AppState>> {
                     .route("/folder/:id/restore", axum::routing::post(crate::api::controllers::files::restore_trash_folder))
                     .route("/folder/:id", axum::routing::delete(crate::api::controllers::files::permanent_delete_trash_folder)),
                 )
+                .nest("/share", axum::Router::new()
+                    .route("/", axum::routing::post(crate::api::controllers::sharing::share_item))
+                    .route("/:id", axum::routing::delete(crate::api::controllers::sharing::delete_share))
+                    .route("/:item_type/:item_id", axum::routing::get(crate::api::controllers::sharing::list_shares_of_item)),
+                )
+                .nest("/shared", axum::Router::new()
+                    .route("/", axum::routing::get(crate::api::controllers::sharing::list_shared))
+                    .route("/folder/:id/contents", axum::routing::get(crate::api::controllers::sharing::shared_folder_contents))
+                    .route("/file/:id/download", axum::routing::get(crate::api::controllers::sharing::download_shared_file)),
+                )
                 .nest("/health", axum::Router::new()
                     .route("/", axum::routing::get(crate::api::controllers::health::health))
                     .route("/ready", axum::routing::get(crate::api::controllers::health::ready)),

@@ -15,8 +15,11 @@
 - **Secure authentication** with JWT + Argon2 password hashing + refresh token rotation
 - **Scoped API keys** for programmatic access (users manage their own from Account → API Keys; admins can create for any user or bot)
 - **Bot accounts** with scoped API keys for automated file operations (admins manage all; eligible users manage their own)
+- **Sharing** — share files and folders with other users by email (recipients can view/download but not reshare; gated by a global toggle and a per-group flag)
+- **Trash** — soft-deleted files and folders with restore and permanent-delete (tree-aware)
 - **Admin panel** with user management, group permissions, bucket configuration, and platform settings
 - **Modern file explorer** with list/grid views, breadcrumbs, search, and shareable `?dir=` deep links
+- **Shared sidebar navigation** across all pages (Dashboard, Files, Shared, Trash, Account, Bots, Admin) with light/dark theme toggle
 - **Background workers** for garbage collection, integrity checks, reference counting, and stats
 - **Strict OS-safe name validation** — one portable rule set for files, folders, and buckets
 - **Rate limiting** and CORS configuration
@@ -194,14 +197,15 @@ keystone/
 │   │   ├── admin.rs         # Bucket, AdminSetting, PlatformSettings
 │   │   ├── audit.rs         # Audit log entries
 │   │   ├── group.rs         # UserGroup
+│   │   ├── share.rs         # SharedItem (file/folder shares between users)
 │   │   └── storage_object.rs # Physical storage references
 │   ├── db/
 │   │   ├── pool.rs          # PostgreSQL connection pool + migrations
 │   │   ├── repos/           # Repository layer (data access)
 │   │   │   ├── users.rs, files.rs, user_files.rs, folders.rs
 │   │   │   ├── api_keys.rs, settings.rs, buckets.rs
-│   │   │   ├── groups.rs, audit.rs, storage_objects.rs
-│   │   └── rows/            # Database row structs
+│   │   │   ├── groups.rs, audit.rs, storage_objects.rs, shares.rs
+│   │   └── rows/            # Database row structs (incl. share_row.rs)
 │   ├── api/
 │   │   ├── routes.rs        # All route definitions
 │   │   ├── extractors.rs    # AuthUser JWT/API-key/bot extractor
@@ -210,7 +214,8 @@ keystone/
 │   │   ├── dto/             # Data transfer objects
 │   │   └── controllers/     # Request handlers
 │   │       ├── auth.rs      # Login, register, refresh, change-password
-│   │       ├── files.rs     # Upload, download, list, rename, move, copy, delete
+│   │       ├── files.rs     # Upload, download, list, rename, move, copy, delete, trash
+│   │       ├── sharing.rs   # Share items, list shared-with-me, browse/download shared
 │   │       ├── health.rs    # Health checks, public settings
 │   │       └── admin/       # Admin controllers
 │   │           ├── stats.rs, settings.rs, buckets.rs
@@ -228,18 +233,21 @@ keystone/
 │   │   ├── traits/          # Storage trait
 │   │   └── workers/         # Background workers (GC, integrity, refcount, cleanup, stats)
 │   └── static/              # HTML pages (compiled in via include_str!)
+│       ├── _sidebar.html    # Shared sidebar (injected into every page)
 │       ├── admin.html       # Admin panel
 │       ├── docs.html        # Admin-only documentation page (/docs)
 │       ├── bots.html        # Bot management page (/bots) — admins all, eligible users own
 │       ├── orphans.html     # Admin-only orphaned-files page (/orphans)
 │       ├── files.html       # File explorer with drag-and-drop
+│       ├── shared.html      # "Shared with Me" page (/shared)
+│       ├── trash.html       # Trash page (/trash) — restore / permanent delete
 │       ├── account.html     # User account settings
 │       ├── login.html       # Login page
 │       ├── register.html    # Registration page
 │       ├── logo.svg         # Brand logo (favicon + in-app)
 │       └── vendor/          # Self-hosted Alpine.js + Tailwind (offline)
-├── migrations/              # SQL migrations (0001-0015)
-├── tests/                   # 290 integration tests
+├── migrations/              # SQL migrations (0001-0022)
+├── tests/                   # 323 integration tests
 └── docker/                  # Docker configuration
 ```
 
@@ -275,8 +283,9 @@ Groups also carry account-level capability flags, toggled from the admin **Group
 | `allow_api_keys` | Whether members may create and manage their own API keys (from the Account → API Keys tab) |
 | `allow_bots` | Whether members may create and manage their own bot accounts (from the Bots page) |
 | `allow_password_change` | Whether members may change their own password |
+| `allow_sharing` | Whether members may share files and folders with other users (from the Files page → Share...) |
 
-These are evaluated with ANY-group-allow semantics: a user may use the capability if **any** of their groups permits it (a single restrictive group cannot block a member who also belongs to an allowed group). Users that belong to **no** group fall back to the global settings below. Admins are always allowed.
+These are evaluated with ANY-group-allow semantics: a user may use the capability if **any** of their groups permits it (a single restrictive group cannot block a member who also belongs to an allowed group). Users that belong to **no** group fall back to the global settings below (sharing excepted — see below). Admins are always allowed.
 
 ### Virtual Folders
 
@@ -292,6 +301,7 @@ Runtime-configurable settings stored in the `admin_settings` table:
 | `allow_user_api_keys` | `false` | Whether users in **no** group may create and manage their own API keys (fallback when a user belongs to no group) |
 | `allow_user_bots` | `false` | Whether users in **no** group may create and manage their own bot accounts (fallback when a user belongs to no group) |
 | `allow_user_password_change` | `false` | Allow non-admin users to change their password |
+| `allow_user_sharing` | `true` | Master switch for user-to-user sharing. When `false`, no non-admin user can share anything. Unlike the other flags there is **no** no-group fallback for sharing: a non-admin user must belong to at least one group with `allow_sharing` to share items (recipients need no special flag — any registered user can receive a share) |
 
 ## API Reference
 
@@ -441,6 +451,37 @@ Resolves a slash path (e.g. `/test/hello`) to a folder id for deep linking. `/` 
 #### DELETE `/api/folders/:id` — Delete Folder
 Children (subfolders and files) are moved to the parent (or bucket root). **Response (200):** `{ "message": "folder 'Documents' deleted" }`
 
+### Trash
+
+Deleting a file or folder soft-deletes it (the bytes stay on disk and the physical blob keeps its `ref_count` until it is purged). Trash preserves the folder hierarchy so an entire deleted tree can be restored at once.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/trash` | List the caller's trashed folders and files: `{ "folders": [TrashFolderDto], "files": [TrashFileDto] }` |
+| POST | `/api/trash/file/:id/restore` | Restore a trashed file. Optional body: `{ "folder_id": "uuid \| null" }` (null = original location) |
+| POST | `/api/trash/folder/:id/restore` | Restore a trashed folder and its whole subtree (files restore to their recorded location) |
+| DELETE | `/api/trash/file/:id` | Permanently delete a trashed file (releases storage quota; physical blob purged when `ref_count` reaches 0) |
+| DELETE | `/api/trash/folder/:id` | Permanently delete a trashed folder and everything in its subtree |
+
+**Errors:** `404` item not in trash, `403` no permission.
+
+### Sharing
+
+Users can share files and folders with other registered users by email. Sharing requires the global `allow_user_sharing` setting (`true` by default) plus a group membership with the `allow_sharing` flag (admins bypass both). Sharing a folder shares its **entire subtree** — descendant folders and files are all granted. Recipients can browse and download shared items but **cannot reshare** them. Bots are rejected on all of these endpoints.
+
+Notable behaviors: shares are per (sharer, recipient, item) — re-sharing to the same person is idempotent; deleting a file/folder automatically removes all of its shares; recipients that don't exist (or the sharer's own email) are reported in `failed_emails`.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/share` | Share an item: `{ "emails": ["alice@example.com", ...], "item_type": "file \| folder", "item_id": "uuid" }` — `item_id` is the `user_file_id` for files. **Response (200):** `{ "message", "shared_count", "failed_emails" }` |
+| GET | `/api/share/:item_type/:item_id` | List who an item is shared with: `{ "shares": [ { "share_id", "user_id", "username", "email", "shared_at" } ] }` (owner only) |
+| DELETE | `/api/share/:id` | Remove a share (only the sharer can remove their own) |
+| GET | `/api/shared` | List everything shared with the current user: `{ "folders": [SharedFolderDto], "files": [SharedFileDto] }` |
+| GET | `/api/shared/folder/:id/contents` | Browse a shared folder's contents (folders + files, with breadcrumbs rooted at "Shared"); a folder is accessible when it or any ancestor is shared |
+| GET | `/api/shared/file/:id/download` | Download a file shared with the current user (attachment) |
+
+**Errors:** `403` sharing disabled / group lacks permission, `404` item not found or not shared with you.
+
 ### Buckets
 
 #### GET `/api/buckets` — List User's Accessible Buckets
@@ -501,9 +542,9 @@ Requests and responses are identical to the corresponding `/api/*` endpoints abo
 #### Stats & Settings
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/api/admin/stats` | `{ total_users, total_files, total_buckets, total_groups, block_registrations, default_bucket }` |
-| GET | `/api/admin/settings` | `{ block_registrations, allow_user_api_keys, allow_user_bots, allow_user_password_change }` |
-| PUT | `/api/admin/settings` | Update setting: `{ "key": "allow_user_api_keys", "value": "true" }` — keys: `block_registrations`, `allow_user_api_keys`, `allow_user_bots`, `allow_user_password_change` (`"true"`/`"false"`), `default_bucket` (bucket name) |
+| GET | `/api/admin/stats` | `{ total_users, total_files, total_buckets, total_groups, block_registrations, active_user_files, active_user_files_size, deleted_user_files, deleted_user_files_size, orphaned_physical_files, orphaned_physical_files_size }` |
+| GET | `/api/admin/settings` | `{ block_registrations, allow_user_api_keys, allow_user_bots, allow_user_password_change, allow_user_sharing }` |
+| PUT | `/api/admin/settings` | Update setting: `{ "key": "allow_user_api_keys", "value": "true" }` — keys: `block_registrations`, `allow_user_api_keys`, `allow_user_bots`, `allow_user_password_change`, `allow_user_sharing` (`"true"`/`"false"`), `default_bucket` (bucket name) |
 
 #### Buckets
 | Method | Path | Purpose |
@@ -604,7 +645,9 @@ The Files UI keeps the current location in the URL, so pages can be bookmarked a
 | Route | Page | Description |
 |-------|------|-------------|
 | `/`, `/dashboard` | Dashboard | Overview and quick actions |
-| `/files` | File Explorer | Browse, upload, organize files with folders |
+| `/files` | File Explorer | Browse, upload, organize files with folders; right-click → Share... |
+| `/shared` | Shared with Me | Files and folders other users shared with you — browse and download |
+| `/trash` | Trash | Soft-deleted files and folders, with restore and permanent delete |
 | `/account` | Account | Profile, security settings, and per-user API key management |
 | `/admin` | Admin Panel | Users, groups, buckets, settings (admin only) |
 | `/bots` | Bots | Bot management — admins see all, eligible users manage their own (scoped API-key accounts) |
@@ -654,7 +697,7 @@ docker compose --env-file .env -f docker/docker-compose.yml up --build
 
 ### Reset the Database
 
-To delete ALL data in the PostgreSQL database and start from scratch (all 14
+To delete ALL data in the PostgreSQL database and start from scratch (all 22
 migrations are re-run on the next start, so the schema is rebuilt exactly as on a
 fresh install):
 
@@ -671,7 +714,7 @@ volumes.
 
 ## Database
 
-PostgreSQL, automatic migrations on startup. Schema managed via 18 numbered migrations:
+PostgreSQL, automatic migrations on startup. Schema managed via 22 numbered migrations:
 
 - **Development** (default): derived from `POSTGRES_*` (or `postgres://keystone:keystone@localhost:5432/keystone`) — also set by `run.sh`
 - **Tests**: need a running Postgres. Each test binary creates its own database on demand, named after the binary (`keystone_test_<binary>`). Override the server with `TEST_DATABASE_BASE_URL` (default: `postgres://keystone:keystone@localhost:5432/postgres`), or set `TEST_DATABASE_URL` to use one pre-provisioned database verbatim.
@@ -696,6 +739,10 @@ PostgreSQL, automatic migrations on startup. Schema managed via 18 numbered migr
 16. Group capability flags (`allow_api_keys`, `allow_bots`, `allow_password_change`)
 17. Bots table
 18. Bot capabilities (copy and edit permissions)
+19. Bot path rules
+20. Soft-deleted folders
+21. User files purged at (trash purge tracking)
+22. Sharing (shared_items table, `allow_sharing` group flag, `allow_user_sharing` setting)
 
 ## License
 

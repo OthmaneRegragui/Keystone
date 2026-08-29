@@ -23,6 +23,14 @@ pub struct FileDto {
     pub bucket_name: Option<String>,
     /// The virtual folder this file is in (None = root).
     pub folder_id: Option<Uuid>,
+    /// Whether this file has been shared with other users.
+    pub is_shared: bool,
+    /// Username of the sharer (populated when browsing shared folder contents).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_by_username: Option<String>,
+    /// When the item was shared (populated when browsing shared folder contents).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_at: Option<DateTime<Utc>>,
 }
 
 /// Build a FileDto from a UserFile + physical File metadata.
@@ -38,6 +46,9 @@ pub fn file_dto_from_user_file(user_file: &UserFile, file: &File) -> FileDto {
         ref_count: file.ref_count,
         bucket_name: user_file.bucket_name.clone(),
         folder_id: user_file.folder_id,
+        is_shared: false,
+        shared_by_username: None,
+        shared_at: None,
     }
 }
 
@@ -142,6 +153,14 @@ pub struct FolderDto {
     pub created_at: DateTime<Utc>,
     pub file_count: i64,
     pub folder_count: i64,
+    /// Whether this folder has been shared with other users.
+    pub is_shared: bool,
+    /// Username of the sharer (populated when browsing shared folder contents).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_by_username: Option<String>,
+    /// When the item was shared (populated when browsing shared folder contents).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -217,4 +236,77 @@ pub struct TrashListDto {
 pub struct RestoreTrashRequest {
     /// Optional destination folder_id within the same bucket. None = restore to original location.
     pub folder_id: Option<Uuid>,
+}
+
+// ── Sharing DTOs ──
+
+#[derive(Debug, Deserialize)]
+pub struct ShareItemRequest {
+    /// Email addresses of users to share with.
+    pub emails: Vec<String>,
+    /// "file" or "folder".
+    pub item_type: String,
+    /// The user_file_id or folder_id to share.
+    pub item_id: Uuid,
+}
+
+/// A folder shared with the current user.
+#[derive(Debug, Serialize)]
+pub struct SharedFolderDto {
+    pub share_id: Uuid,
+    pub folder_id: Uuid,
+    pub name: String,
+    pub bucket_name: String,
+    pub shared_by_user_id: Uuid,
+    pub shared_by_username: String,
+    pub shared_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A file shared with the current user.
+#[derive(Debug, Serialize)]
+pub struct SharedFileDto {
+    pub share_id: Uuid,
+    pub user_file_id: Uuid,
+    pub name: String,
+    pub hash: String,
+    pub size: i64,
+    pub mime_type: Option<String>,
+    pub bucket_name: Option<String>,
+    pub folder_id: Option<Uuid>,
+    pub shared_by_user_id: Uuid,
+    pub shared_by_username: String,
+    pub shared_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SharedListDto {
+    pub folders: Vec<SharedFolderDto>,
+    pub files: Vec<SharedFileDto>,
+}
+
+/// Who an item is shared with (for the share management UI on /files).
+#[derive(Debug, Serialize)]
+pub struct ShareInfoDto {
+    pub share_id: Uuid,
+    pub user_id: Uuid,
+    pub username: String,
+    pub email: String,
+    pub shared_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ShareInfoListDto {
+    pub shares: Vec<ShareInfoDto>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteShareRequest {
+    pub share_id: Uuid,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ShareResultDto {
+    pub message: String,
+    pub shared_count: usize,
+    pub failed_emails: Vec<String>,
 }

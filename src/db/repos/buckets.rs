@@ -224,6 +224,35 @@ impl BucketRepository {
             .collect())
     }
 
+    /// Check if a user can download from a specific bucket.
+    pub async fn user_can_download(pool: &PgPool, user_id: &str, bucket_name: &str) -> AppResult<bool> {
+        let (allowed,): (bool,) = sqlx::query_as(
+            "SELECT COALESCE(BOOL_OR(gb.can_download), false)
+             FROM group_buckets gb
+             INNER JOIN group_members gm ON gb.group_id = gm.group_id AND gm.user_id = $1
+             WHERE gb.bucket_id = $2",
+        )
+        .bind(user_id)
+        .bind(bucket_name)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to check download permission: {e}")))?;
+        Ok(allowed)
+    }
+
+    /// Check if a bucket is visible to all users.
+    pub async fn is_visible_to_users(pool: &PgPool, bucket_name: &str) -> AppResult<bool> {
+        let row: Option<(bool,)> = sqlx::query_as(
+            "SELECT visible_to_users FROM buckets WHERE name = $1",
+        )
+        .bind(bucket_name)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to check bucket visibility: {e}")))?;
+
+        Ok(row.map(|(v,)| v).unwrap_or(false))
+    }
+
     /// Returns buckets accessible to a user with permissions merged across all groups.
     /// Only buckets the user has explicit group access to are returned.
     /// - `can_upload`: true if ANY group grants upload (OR logic)

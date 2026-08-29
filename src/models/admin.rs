@@ -25,4 +25,5 @@ pub struct PlatformSettings {
     pub allow_user_api_keys: bool,
     pub allow_user_bots: bool,
     pub allow_user_password_change: bool,
+    pub allow_user_sharing: bool,
 }

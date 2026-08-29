@@ -6,11 +6,11 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use crate::error::{AppError, AppResult};
-use crate::models::{File, UserFile};
+use crate::models::{File, SharedItemType, UserFile};
 use crate::db::rows::{CreateStorageObjectData, FileRecord, FolderRecord, UserFileRecord};
 use crate::db::repos::{
     buckets::AccessibleBucket, BotRepository, BucketRepository, FileRepository,
-    FolderRepository, StorageObjectRepository, UserFileRepository, UserRepository,
+    FolderRepository, ShareRepository, StorageObjectRepository, UserFileRepository, UserRepository,
 };
 use crate::utils::hashing::blake3::hash_bytes;
 use crate::utils::names::validate_component_name;
@@ -663,6 +663,15 @@ pub async fn list_files(
         })
         .collect();
 
+    // Batch-check which files are shared
+    let file_id_strs: Vec<String> = files.iter().map(|f| f.user_file_id.to_string()).collect();
+    let shared_file_ids = ShareRepository::get_shared_file_ids(state.db.pool(), &file_id_strs).await.unwrap_or_default();
+    let shared_set: std::collections::HashSet<String> = shared_file_ids.into_iter().collect();
+    let mut files = files;
+    for f in &mut files {
+        f.is_shared = shared_set.contains(&f.user_file_id.to_string());
+    }
+
     Ok(Json(FileListDto {
         files,
         total,
@@ -861,6 +870,9 @@ pub async fn delete_file(
     // Soft-delete: mark the file as deleted and release storage quota.
     // The file remains in the trash bin until the user permanently deletes it.
     UserFileRepository::delete(state.db.pool(), user_file.id).await?;
+
+    // Remove any shares for this file so it no longer appears in recipients' shared views.
+    let _ = ShareRepository::delete_by_item(state.db.pool(), SharedItemType::File, user_file.id).await;
 
     // Release the file's size from the user's storage quota so they can
     // re-upload immediately. Re-charging happens on restore.
@@ -1598,6 +1610,8 @@ pub async fn batch_delete(
                         if let Ok(Some(f)) = FileRepository::find_by_id(state.db.pool(), uf.file_id).await {
                             let _ = UserRepository::release_storage(state.db.pool(), auth_user.user_id, f.size).await;
                         }
+                        // Remove shares for this file
+                        let _ = ShareRepository::delete_by_item(state.db.pool(), SharedItemType::File, uf.id).await;
                         success += 1
                     }
                     _ => { failed += 1; errors.push(format!("{}: delete failed", uf.original_name)); }
@@ -2038,6 +2052,9 @@ pub async fn create_folder(
         created_at: folder.created_at,
         file_count,
         folder_count,
+        is_shared: false,
+        shared_by_username: None,
+        shared_at: None,
     }))
 }
 
@@ -2108,10 +2125,22 @@ pub async fn list_folder_contents(
                 created_at: f.created_at,
                 file_count,
                 folder_count,
+                is_shared: false,
+                shared_by_username: None,
+                shared_at: None,
             });
         }
         dtos
     };
+
+    // Batch-check which folders are shared
+    let folder_id_strs: Vec<String> = folder_dtos.iter().map(|f| f.id.to_string()).collect();
+    let shared_folder_ids = ShareRepository::get_shared_folder_ids(state.db.pool(), &folder_id_strs).await.unwrap_or_default();
+    let shared_folder_set: std::collections::HashSet<String> = shared_folder_ids.into_iter().collect();
+    let mut folder_dtos = folder_dtos;
+    for f in &mut folder_dtos {
+        f.is_shared = shared_folder_set.contains(&f.id.to_string());
+    }
 
     // Build breadcrumb path
     let path = if let Some(fid) = folder_id {
@@ -2327,6 +2356,20 @@ pub async fn delete_folder(
     // Release storage quota for all files soft-deleted by the folder delete
     if total_size > 0 {
         let _ = UserRepository::release_storage(state.db.pool(), auth_user.user_id, total_size).await;
+    }
+
+    // Remove all shares for this folder and its descendants
+    {
+        let all_folder_ids = FolderRepository::list_descendant_ids(state.db.pool(), folder.id).await.unwrap_or_default();
+        let mut share_folder_ids = vec![folder.id.to_string()];
+        share_folder_ids.extend(all_folder_ids.iter().map(|id| id.to_string()));
+        let _ = ShareRepository::delete_by_folder_ids(state.db.pool(), &share_folder_ids).await;
+
+        // Remove shares for all files in the folder tree
+        if !share_folder_ids.is_empty() {
+            let file_ids = UserFileRepository::list_ids_in_folders(state.db.pool(), auth_user.user_id, &share_folder_ids).await.unwrap_or_default();
+            let _ = ShareRepository::delete_by_user_file_ids(state.db.pool(), &file_ids).await;
+        }
     }
 
     Ok(Json(MessageResponse {

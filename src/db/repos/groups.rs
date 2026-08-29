@@ -10,7 +10,7 @@ impl GroupRepository {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
 
-        sqlx::query("INSERT INTO user_groups (id, name, created_at, allow_api_keys, allow_password_change) VALUES ($1, $2, $3, FALSE, FALSE)")
+        sqlx::query("INSERT INTO user_groups (id, name, created_at, allow_api_keys, allow_password_change, allow_bots, allow_sharing) VALUES ($1, $2, $3, FALSE, FALSE, FALSE, FALSE)")
             .bind(&id)
             .bind(name)
             .bind(&now)
@@ -31,19 +31,20 @@ impl GroupRepository {
             allow_api_keys: false,
             allow_password_change: false,
             allow_bots: false,
+            allow_sharing: false,
         })
     }
 
     pub async fn list(pool: &PgPool) -> AppResult<Vec<UserGroup>> {
-        let rows: Vec<(String, String, String, bool, bool, bool)> =
-            sqlx::query_as("SELECT id, name, created_at, allow_api_keys, allow_password_change, allow_bots FROM user_groups ORDER BY name ASC")
+        let rows: Vec<(String, String, String, bool, bool, bool, bool)> =
+            sqlx::query_as("SELECT id, name, created_at, allow_api_keys, allow_password_change, allow_bots, allow_sharing FROM user_groups ORDER BY name ASC")
                 .fetch_all(pool)
                 .await
                 .map_err(|e| AppError::Internal(format!("failed to list groups: {e}")))?;
 
         Ok(rows
             .into_iter()
-            .map(|(id, name, created_at, allow_api_keys, allow_password_change, allow_bots)| UserGroup {
+            .map(|(id, name, created_at, allow_api_keys, allow_password_change, allow_bots, allow_sharing)| UserGroup {
                 id,
                 name,
                 created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
@@ -52,6 +53,7 @@ impl GroupRepository {
                 allow_api_keys,
                 allow_password_change,
                 allow_bots,
+                allow_sharing,
             })
             .collect())
     }
@@ -263,14 +265,14 @@ impl GroupRepository {
     }
 
     pub async fn get_by_id(pool: &PgPool, id: &str) -> AppResult<Option<UserGroup>> {
-        let row: Option<(String, String, String, bool, bool, bool)> =
-            sqlx::query_as("SELECT id, name, created_at, allow_api_keys, allow_password_change, allow_bots FROM user_groups WHERE id = $1")
+        let row: Option<(String, String, String, bool, bool, bool, bool)> =
+            sqlx::query_as("SELECT id, name, created_at, allow_api_keys, allow_password_change, allow_bots, allow_sharing FROM user_groups WHERE id = $1")
                 .bind(id)
                 .fetch_optional(pool)
                 .await
                 .map_err(|e| AppError::Internal(format!("failed to get group: {e}")))?;
 
-        Ok(row.map(|(id, name, created_at, allow_api_keys, allow_password_change, allow_bots)| UserGroup {
+        Ok(row.map(|(id, name, created_at, allow_api_keys, allow_password_change, allow_bots, allow_sharing)| UserGroup {
             id,
             name,
             created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
@@ -279,6 +281,7 @@ impl GroupRepository {
             allow_api_keys,
             allow_password_change,
             allow_bots,
+            allow_sharing,
         }))
     }
 
@@ -288,13 +291,15 @@ impl GroupRepository {
         allow_api_keys: bool,
         allow_password_change: bool,
         allow_bots: bool,
+        allow_sharing: bool,
     ) -> AppResult<bool> {
         let affected = sqlx::query(
-            "UPDATE user_groups SET allow_api_keys = $1, allow_password_change = $2, allow_bots = $3 WHERE id = $4",
+            "UPDATE user_groups SET allow_api_keys = $1, allow_password_change = $2, allow_bots = $3, allow_sharing = $4 WHERE id = $5",
         )
         .bind(allow_api_keys)
         .bind(allow_password_change)
         .bind(allow_bots)
+        .bind(allow_sharing)
         .bind(id)
         .execute(pool)
         .await

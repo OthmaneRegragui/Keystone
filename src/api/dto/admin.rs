@@ -132,6 +132,8 @@ pub struct UpdateGroupPermissionsRequest {
     pub allow_api_keys: bool,
     pub allow_password_change: bool,
     pub allow_bots: bool,
+    #[serde(default)]
+    pub allow_sharing: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -275,6 +277,7 @@ pub struct GroupDto {
     pub allow_api_keys: bool,
     pub allow_password_change: bool,
     pub allow_bots: bool,
+    pub allow_sharing: bool,
 }
 
 impl GroupDto {
@@ -288,6 +291,7 @@ impl GroupDto {
             allow_api_keys: group.allow_api_keys,
             allow_password_change: group.allow_password_change,
             allow_bots: group.allow_bots,
+            allow_sharing: group.allow_sharing,
         }
     }
 }
@@ -314,6 +318,7 @@ pub struct GroupDetailDto {
     pub allow_api_keys: bool,
     pub allow_password_change: bool,
     pub allow_bots: bool,
+    pub allow_sharing: bool,
 }
 
 #[derive(Debug, Serialize)]

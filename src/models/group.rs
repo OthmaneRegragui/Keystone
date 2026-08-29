@@ -9,4 +9,5 @@ pub struct UserGroup {
     pub allow_api_keys: bool,
     pub allow_password_change: bool,
     pub allow_bots: bool,
+    pub allow_sharing: bool,
 }

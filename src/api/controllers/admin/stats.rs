@@ -32,6 +32,7 @@ pub async fn get_stats(
             allow_user_api_keys: false,
             allow_user_bots: false,
             allow_user_password_change: false,
+            allow_user_sharing: true,
         });
 
     Ok(Json(AdminStatsDto {
