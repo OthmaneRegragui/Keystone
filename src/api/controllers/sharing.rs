@@ -80,17 +80,19 @@ pub async fn share_item(
             continue;
         }
 
+        // Do not reveal whether an email is registered. Every syntactically
+        // valid, non-self, non-duplicate share attempt looks identical to the
+        // caller: a registered recipient silently gets the share and a missing
+        // recipient is treated the same as a duplicate or self-share. Only
+        // structurally invalid emails are echoed back. This prevents the
+        // endpoint from being used as an email-enumeration oracle.
         let recipient_id = match ShareRepository::find_user_id_by_email(state.db.pool(), &email).await? {
             Some(id) => id,
-            None => {
-                failed_emails.push(email);
-                continue;
-            }
+            None => continue,
         };
 
-        // Cannot share with yourself
+        // Cannot share with yourself.
         if recipient_id == auth_user.user_id {
-            failed_emails.push(email);
             continue;
         }
 
@@ -102,8 +104,11 @@ pub async fn share_item(
                     SharedItemType::File,
                     body.item_id,
                 );
-                let _ = ShareRepository::create(state.db.pool(), data).await;
-                shared_count += 1;
+                // Only count a share as successful when a new row was actually
+                // inserted (an existing/duplicate share is not a new one).
+                if ShareRepository::create(state.db.pool(), data).await? {
+                    shared_count += 1;
+                }
             }
             SharedItemType::Folder => {
                 let count = ShareRepository::create_folder_shares(
@@ -162,9 +167,11 @@ pub async fn list_shared(
                 }
             }
             SharedItemType::File => {
-                // Look up the file details (the file might be owned by another user)
+                // Look up the file details (the file might be owned by another user).
+                // `deleted_at IS NULL` so a previously-shared file that the owner has
+                // trashed no longer exposes its metadata here.
                 let row = sqlx::query_as::<_, crate::db::rows::UserFileRow>(
-                    "SELECT * FROM user_files WHERE id = $1",
+                    "SELECT * FROM user_files WHERE id = $1 AND deleted_at IS NULL",
                 )
                 .bind(item.item_id.to_string())
                 .fetch_optional(state.db.pool())
@@ -267,16 +274,34 @@ pub async fn download_shared_file(
     auth_user.require_scope("files:read")?;
     auth_user.require_bot_capability(BotCapability::Download)?;
 
-    // Verify this file is shared with the current user
+    // Verify the caller can access this file: either the file is directly
+    // shared with them, or it lives inside a folder that is shared with them
+    // (matching how `shared_folder_contents` authorises listing, so a file the
+    // recipient can see in a shared folder is also downloadable).
     let is_shared = ShareRepository::is_shared_with(
         state.db.pool(),
         SharedItemType::File,
         user_file_id,
         auth_user.user_id,
-    ).await?;
+    )
+    .await?;
 
     if !is_shared {
-        return Err(AppError::NotFound("file not found or not shared with you".into()));
+        // The file is not directly shared — fall back to checking whether any
+        // ancestor folder of this file is shared with the recipient.
+        let user_file = UserFileRepository::find_by_id(state.db.pool(), user_file_id).await?;
+        let via_folder = match user_file.as_ref().and_then(|uf| uf.folder_id) {
+            Some(folder_id) => is_shared_or_ancestor_shared(
+                state.db.pool(),
+                auth_user.user_id,
+                folder_id,
+            )
+            .await?,
+            None => false,
+        };
+        if !via_folder {
+            return Err(AppError::NotFound("file not found or not shared with you".into()));
+        }
     }
 
     // Look up the file
@@ -429,7 +454,12 @@ async fn is_shared_or_ancestor_shared(
 ) -> AppResult<bool> {
     // Walk up the folder tree checking if any ancestor is shared
     let mut current = Some(folder_id);
+    // Guard against parent_id cycles so a corrupted tree cannot loop forever.
+    let mut visited = std::collections::HashSet::new();
     while let Some(fid) = current {
+        if !visited.insert(fid) {
+            break;
+        }
         if ShareRepository::is_shared_with(pool, SharedItemType::Folder, fid, user_id).await? {
             return Ok(true);
         }
@@ -453,7 +483,12 @@ async fn find_top_level_share_sharer(
     // Collect the chain of folder IDs from current up to root
     let mut chain = Vec::new();
     let mut current = Some(folder_id);
+    // Guard against parent_id cycles so a corrupted tree cannot loop forever.
+    let mut visited = std::collections::HashSet::new();
     while let Some(fid) = current {
+        if !visited.insert(fid) {
+            break;
+        }
         chain.push(fid);
         if let Some(folder) = FolderRepository::find_by_id(pool, fid).await? {
             current = folder.parent_id;

@@ -23,6 +23,16 @@ pub struct FolderRepository;
 impl FolderRepository {
     /// Create a new virtual folder.
     pub async fn create(pool: &PgPool, record: FolderRecord) -> AppResult<UserFolder> {
+        // Preventive guard: never persist a name with characters that could
+        // break paths, regardless of which caller invokes this. Hardens the
+        // data layer against future (or legacy) misuse.
+        if let Err(e) = crate::utils::names::validate_component_name(&record.name) {
+            return Err(AppError::BadRequest(format!(
+                "invalid folder name '{}': {e}",
+                record.name
+            )));
+        }
+
         let now = chrono::Utc::now().to_rfc3339();
         let id = record.id.to_string();
 
@@ -306,8 +316,13 @@ impl FolderRepository {
     pub async fn get_path(pool: &PgPool, folder_id: Uuid) -> AppResult<Vec<(Uuid, String)>> {
         let mut path = Vec::new();
         let mut current_id = Some(folder_id);
+        // Guard against parent_id cycles so a corrupted tree cannot loop forever.
+        let mut visited = std::collections::HashSet::new();
 
         while let Some(id) = current_id {
+            if !visited.insert(id) {
+                break;
+            }
             let folder = Self::find_by_id(pool, id).await?;
             match folder {
                 Some(f) => {
@@ -471,14 +486,19 @@ impl FolderRepository {
         }
 
         // Cycle detection: if new_parent_id is set, walk up from new_parent_id
-        // and make sure we never hit folder_id
+        // and make sure we never hit folder_id. A visited set also guards
+        // against a pre-existing corrupted cycle, which would otherwise loop.
         if let Some(target_id) = new_parent_id {
             let mut cursor = Some(target_id);
+            let mut visited = std::collections::HashSet::new();
             while let Some(current) = cursor {
                 if current == folder_id {
                     return Err(AppError::BadRequest(
                         "cannot move folder into one of its own subfolders".into(),
                     ));
+                }
+                if !visited.insert(current) {
+                    break;
                 }
                 let parent_folder = Self::find_by_id(pool, current).await?;
                 cursor = parent_folder.and_then(|f| f.parent_id);

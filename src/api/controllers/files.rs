@@ -1086,16 +1086,32 @@ pub async fn move_file(
         }
     }
 
-    // Cross-bucket moves require upload permission on the target bucket.
-    if target_bucket != user_file.bucket_name {
-        if let Some(ref tb) = target_bucket {
-            auth_user.require_bot_bucket(tb)?;
-            let accessible = accessible_buckets(&state, auth_user.user_id).await?;
-            if !can_upload_on(&accessible, tb) {
-                return Err(AppError::Forbidden(format!(
-                    "upload not permitted for bucket '{}'",
-                    tb
-                )));
+    // Moving a file (re-parenting or re-bucketing) mutates the user's file
+    // tree in the target location, so upload permission on the *target* bucket
+    // is required regardless of whether it differs from the source bucket. A
+    // download-only user must not be able to reorganise a read-only bucket.
+    if let Some(ref tb) = target_bucket {
+        auth_user.require_bot_bucket(tb)?;
+        let accessible = accessible_buckets(&state, auth_user.user_id).await?;
+        if !can_upload_on(&accessible, tb) {
+            return Err(AppError::Forbidden(format!(
+                "upload not permitted for bucket '{}'",
+                tb
+            )));
+        }
+    }
+
+    // A bot moving a file to the bucket root must be allowed to access the
+    // root path (mirrors the upload/create-folder root gates).
+    if body.folder_id.is_none() {
+        if let Some(bot) = &auth_user.bot {
+            if let Some(ref tb) = target_bucket {
+                if !bot.path_allowed(tb, "") {
+                    return Err(AppError::Forbidden(format!(
+                        "bot '{}' cannot move files to the root of bucket '{}'",
+                        bot.name, tb
+                    )));
+                }
             }
         }
     }
@@ -1192,6 +1208,19 @@ pub async fn copy_file(
         target_bucket.unwrap_or_else(|| user_file.bucket_name.clone().unwrap_or_default());
 
     auth_user.require_bot_bucket(&target_bucket)?;
+
+    // A bot copying a file to the bucket root must be allowed to access the
+    // root path (mirrors the upload/create-folder root gates).
+    if body.folder_id.is_none() {
+        if let Some(bot) = &auth_user.bot {
+            if !bot.path_allowed(&target_bucket, "") {
+                return Err(AppError::Forbidden(format!(
+                    "bot '{}' cannot copy files to the root of bucket '{}'",
+                    bot.name, target_bucket
+                )));
+            }
+        }
+    }
 
     let accessible = accessible_buckets(&state, auth_user.user_id).await?;
 
@@ -1344,23 +1373,54 @@ pub async fn batch_move(
                     .or_else(|| target_folder_bucket.clone())
                     .or(uf.bucket_name.clone());
 
-                // A cross-bucket move needs upload permission on the target.
-                if bucket != uf.bucket_name {
-                    match bucket.as_deref() {
-                        Some(b) if !b.is_empty() && !can_upload_on(&accessible, b) => {
+                // A move always mutates the target bucket's file tree, so
+                // upload permission on the *effective* target is required even
+                // for a same-bucket re-parent. An empty bucket name would also
+                // skip real ACL checks and orphan the row, so reject it.
+                let Some(target) = bucket.as_deref() else {
+                    failed += 1;
+                    errors.push(format!("{}: no target bucket", uf.original_name));
+                    continue;
+                };
+                if target.is_empty() {
+                    failed += 1;
+                    errors.push(format!("{}: invalid empty target bucket", uf.original_name));
+                    continue;
+                }
+                if auth_user.require_bot_bucket(target).is_err() {
+                    failed += 1;
+                    errors.push(format!(
+                        "{}: no permission for bucket '{}'",
+                        uf.original_name, target
+                    ));
+                    continue;
+                }
+                if !can_upload_on(&accessible, target) {
+                    failed += 1;
+                    errors.push(format!(
+                        "{}: no upload permission for bucket '{}'",
+                        uf.original_name, target
+                    ));
+                    continue;
+                }
+
+                // A bot moving a file to the bucket root must be allowed to
+                // access the root path.
+                if body.folder_id.is_none() {
+                    if let Some(bot) = &auth_user.bot {
+                        if !bot.path_allowed(target, "") {
                             failed += 1;
                             errors.push(format!(
-                                "{}: no upload permission for bucket '{}'",
-                                uf.original_name, b
+                                "{}: bot cannot move to the root of bucket '{}'",
+                                uf.original_name, target
                             ));
                             continue;
                         }
-                        _ => {}
                     }
                 }
 
                 match UserFileRepository::update_bucket_and_folder(
-                    state.db.pool(), uf.id, bucket, body.folder_id
+                    state.db.pool(), uf.id, Some(target.to_string()), body.folder_id
                 ).await {
                     Ok(true) => success += 1,
                     Ok(false) => { failed += 1; errors.push(format!("{}: not found", uf.original_name)); }
@@ -1452,17 +1512,50 @@ pub async fn batch_copy(
                     }
                 }
 
-                // Copying requires upload permission on the target bucket.
-                match bucket.as_deref() {
-                    Some(b) if !b.is_empty() && !can_upload_on(&accessible, b) => {
-                        failed += 1;
-                        errors.push(format!(
-                            "{}: no upload permission for bucket '{}'",
-                            uf.original_name, b
-                        ));
-                        continue;
+                // Copying requires upload permission on the *effective* target
+                // bucket, whether or not it differs from the source. An empty
+                // bucket name would skip the ACL check and orphan the copy, so
+                // reject it outright.
+                let Some(target) = bucket.as_deref() else {
+                    failed += 1;
+                    errors.push(format!("{}: no target bucket", uf.original_name));
+                    continue;
+                };
+                if target.is_empty() {
+                    failed += 1;
+                    errors.push(format!("{}: invalid empty target bucket", uf.original_name));
+                    continue;
+                }
+                if auth_user.require_bot_bucket(target).is_err() {
+                    failed += 1;
+                    errors.push(format!(
+                        "{}: no permission for bucket '{}'",
+                        uf.original_name, target
+                    ));
+                    continue;
+                }
+                if !can_upload_on(&accessible, target) {
+                    failed += 1;
+                    errors.push(format!(
+                        "{}: no upload permission for bucket '{}'",
+                        uf.original_name, target
+                    ));
+                    continue;
+                }
+
+                // A bot copying a file to the bucket root must be allowed to
+                // access the root path.
+                if body.folder_id.is_none() {
+                    if let Some(bot) = &auth_user.bot {
+                        if !bot.path_allowed(target, "") {
+                            failed += 1;
+                            errors.push(format!(
+                                "{}: bot cannot copy to the root of bucket '{}'",
+                                uf.original_name, target
+                            ));
+                            continue;
+                        }
                     }
-                    _ => {}
                 }
 
                 let copy_name = match available_copy_name(
@@ -1687,6 +1780,18 @@ pub async fn restore_trash_file(
         .await?
         .ok_or_else(|| AppError::NotFound("file not found in trash".into()))?;
 
+    // Restoring re-activates the file in its bucket, which is a write to that
+    // bucket, so upload permission is required (matches upload/delete_file).
+    if let Some(ref bucket_name) = user_file.bucket_name {
+        let accessible = accessible_buckets(&state, auth_user.user_id).await?;
+        if !can_upload_on(&accessible, bucket_name) {
+            return Err(AppError::Forbidden(format!(
+                "cannot restore files into bucket '{}'",
+                bucket_name
+            )));
+        }
+    }
+
     // If a destination folder is specified, verify it exists and belongs to the same bucket
     if let Some(dest_folder_id) = body.folder_id {
         let dest_folder = FolderRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, dest_folder_id)
@@ -1732,6 +1837,17 @@ pub async fn restore_trash_folder(
     let folder = FolderRepository::find_trashed_by_user_and_id(state.db.pool(), auth_user.user_id, id)
         .await?
         .ok_or_else(|| AppError::NotFound("folder not found in trash".into()))?;
+
+    // Restoring the folder tree re-activates files within its bucket, so
+    // upload permission on that bucket is required (matches create_folder and
+    // restore_trash_file).
+    let accessible = accessible_buckets(&state, auth_user.user_id).await?;
+    if !can_upload_on(&accessible, &folder.bucket_name) {
+        return Err(AppError::Forbidden(format!(
+            "cannot restore folders in bucket '{}'",
+            folder.bucket_name
+        )));
+    }
 
     // If a destination parent is specified, verify it's in the same bucket
     if let Some(dest_parent_id) = body.folder_id {
@@ -2217,6 +2333,7 @@ pub async fn resolve_folder_path(
     Query(params): Query<ResolvePathParams>,
 ) -> AppResult<Json<FolderResolveDto>> {
     auth_user.require_scope("files:read")?;
+    auth_user.require_bot_capability(BotCapability::List)?;
     let bucket_id = params.bucket_id.as_ref()
         .ok_or_else(|| AppError::BadRequest("bucket_id parameter is required".into()))?;
     let path = params.path.as_ref()
@@ -2296,6 +2413,16 @@ pub async fn rename_folder(
         .await?
         .ok_or_else(|| AppError::NotFound("folder not found".into()))?;
     require_bot_folder_access_ancestors(&state, &auth_user, &folder).await?;
+
+    // Renaming mutates the folder within its bucket, so write (upload)
+    // permission on that bucket is required (matches create/delete_folder).
+    let accessible = accessible_buckets(&state, auth_user.user_id).await?;
+    if !can_upload_on(&accessible, &folder.bucket_name) {
+        return Err(AppError::Forbidden(format!(
+            "cannot rename folders in bucket '{}'",
+            folder.bucket_name
+        )));
+    }
 
     FolderRepository::update_name(state.db.pool(), folder.id, &name).await?;
 
@@ -2391,6 +2518,18 @@ pub async fn move_folder(
         .ok_or_else(|| AppError::NotFound("folder not found".into()))?;
     require_bot_folder_access_ancestors(&state, &auth_user, &folder).await?;
     auth_user.require_bot_bucket(&folder.bucket_name)?;
+
+    // Re-parenting a folder mutates the folder tree inside its bucket, so
+    // upload permission on that bucket is required (matches create/delete
+    // folder semantics). A download-only user must not be able to reorganise
+    // folders in a read-only bucket.
+    let accessible = accessible_buckets(&state, auth_user.user_id).await?;
+    if !can_upload_on(&accessible, &folder.bucket_name) {
+        return Err(AppError::Forbidden(format!(
+            "cannot move folders in bucket '{}'",
+            folder.bucket_name
+        )));
+    }
 
     // The target folder must belong to the same user and the same bucket, so
     // folders can never end up nested across buckets.

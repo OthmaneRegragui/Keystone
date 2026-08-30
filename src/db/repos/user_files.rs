@@ -169,6 +169,17 @@ pub struct UserFileRepository;
 impl UserFileRepository {
     /// Create a user_file entry linking a user to a file.
     pub async fn create(pool: &PgPool, record: UserFileRecord) -> AppResult<UserFile> {
+        // Preventive guard: never persist a name with characters that could
+        // break downloads/exports/paths, regardless of which caller invokes
+        // this. Callers should also validate for a better error, but this
+        // hardens the data layer against future (or legacy) misuse.
+        if let Err(e) = crate::utils::names::validate_component_name(&record.original_name) {
+            return Err(AppError::BadRequest(format!(
+                "invalid file name '{}': {e}",
+                record.original_name
+            )));
+        }
+
         let now = Utc::now().to_rfc3339();
         let id = record.id.to_string();
 
@@ -419,6 +430,20 @@ impl UserFileRepository {
         .await
         .map_err(|e| AppError::Internal(format!("failed to hard-delete user_file: {e}")))?
         .rows_affected();
+
+        Ok(affected > 0)
+    }
+
+    /// Permanently delete a user_file row regardless of its deleted_at state.
+    /// Used to roll back a just-inserted row when a later step (e.g. a storage
+    /// quota check) fails, so no ghost reference is left behind.
+    pub async fn hard_delete_by_id(pool: &PgPool, id: Uuid) -> AppResult<bool> {
+        let affected = sqlx::query("DELETE FROM user_files WHERE id = $1")
+            .bind(id.to_string())
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to delete user_file: {e}")))?
+            .rows_affected();
 
         Ok(affected > 0)
     }

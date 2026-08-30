@@ -23,11 +23,16 @@ pub struct ShareRepository;
 
 impl ShareRepository {
     /// Create a single share record.
-    pub async fn create(pool: &PgPool, data: CreateSharedItemData) -> AppResult<SharedItem> {
+    ///
+    /// Returns `true` when a new row was inserted and `false` when the share
+    /// already existed (the insert is a no-op via `ON CONFLICT DO NOTHING`).
+    /// Callers use the boolean so failed/deduped shares are not reported as
+    /// successful new share.
+    pub async fn create(pool: &PgPool, data: CreateSharedItemData) -> AppResult<bool> {
         let now = Utc::now().to_rfc3339();
         let id = data.id.to_string();
 
-        sqlx::query(
+        let res = sqlx::query(
             r#"INSERT INTO shared_items (id, shared_by_user_id, shared_with_user_id, item_type, item_id, created_at)
                VALUES ($1, $2, $3, $4, $5, $6)
                ON CONFLICT (shared_by_user_id, shared_with_user_id, item_type, item_id) DO NOTHING"#,
@@ -42,9 +47,7 @@ impl ShareRepository {
         .await
         .map_err(|e| AppError::Internal(format!("failed to create share: {e}")))?;
 
-        Self::find_by_id(pool, Uuid::parse_str(&id).unwrap())
-            .await?
-            .ok_or_else(|| AppError::Internal("share not found after insert".to_string()))
+        Ok(res.rows_affected() > 0)
     }
 
     /// Find a share by ID.
@@ -148,18 +151,129 @@ impl ShareRepository {
     }
 
     /// Delete a share. Only the sharer can delete their own share.
-    pub async fn delete_share(pool: &PgPool, share_id: Uuid, shared_by_user_id: Uuid) -> AppResult<bool> {
-        let affected = sqlx::query(
-            "DELETE FROM shared_items WHERE id = $1 AND shared_by_user_id = $2",
-        )
-        .bind(share_id.to_string())
-        .bind(shared_by_user_id.to_string())
-        .execute(pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("failed to delete share: {e}")))?
-        .rows_affected();
+    ///
+    /// When the share is a *folder*, every descendant folder and file is revoked
+    /// from the same recipient too. Sharing a folder materialises independent
+    /// rows for the root folder, each subfolder and each file; revoking only the
+    /// top-level row would otherwise leave the recipient with working access to
+    /// every descendant (see the folder-sharing creation in
+    /// [`Self::create_folder_shares`]). Issuing a single `DELETE` that cascades
+    /// over the whole folder tree keeps revocation atomic and correct.
+    pub async fn delete_share(
+        pool: &PgPool,
+        share_id: Uuid,
+        shared_by_user_id: Uuid,
+    ) -> AppResult<bool> {
+        // Fetch the share first so we can tell folder shares apart from file
+        // shares and read the recipient (needed for the cascade).
+        let share = Self::find_by_id(pool, share_id)
+            .await?
+            .filter(|s| s.shared_by_user_id == shared_by_user_id);
 
-        Ok(affected > 0)
+        let Some(share) = share else {
+            // Either it does not exist or it is not owned by this sharer.
+            return Ok(false);
+        };
+
+        if share.item_type == SharedItemType::Folder {
+            Self::delete_folder_tree_shares(
+                pool,
+                shared_by_user_id,
+                share.shared_with_user_id,
+                share.item_id,
+            )
+            .await?;
+        } else {
+            // Single placeholder row delete; there is only one row per
+            // (sharer, recipient, file).
+            let _ = sqlx::query("DELETE FROM shared_items WHERE id = $1")
+                .bind(share_id.to_string())
+                .execute(pool)
+                .await
+                .map_err(|e| AppError::Internal(format!("failed to delete share: {e}")))?;
+        }
+
+        Ok(true)
+    }
+
+    /// Delete a folder share and every descendant folder/file share that a
+    /// specific sharer granted to a specific recipient underneath `folder_id`.
+    ///
+    /// This is the mirror of [`Self::create_folder_shares`]: both walk the same
+    /// folder subtree (recursive CTE) so the set of revoked rows always matches
+    /// the set of rows that sharing created.
+    async fn delete_folder_tree_shares(
+        pool: &PgPool,
+        shared_by_user_id: Uuid,
+        shared_with_user_id: Uuid,
+        folder_id: Uuid,
+    ) -> AppResult<()> {
+        // Collect every folder in the subtree (root + descendants).
+        let folder_ids: Vec<(String,)> = sqlx::query_as::<_, (String,)>(
+            r#"WITH RECURSIVE tree(id) AS (
+                   SELECT id FROM user_folders WHERE id = $1
+                   UNION ALL
+                   SELECT uf.id FROM user_folders uf
+                   INNER JOIN tree t ON uf.parent_id = t.id
+               )
+               SELECT id FROM tree"#,
+        )
+        .bind(folder_id.to_string())
+        .fetch_all(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to collect folder tree for unsharing: {e}")))?;
+
+        let folder_id_list: Vec<String> = folder_ids.iter().map(|(id,)| id.clone()).collect();
+
+        // Delete the folder share for (sharer, recipient) across the whole tree.
+        for (fid,) in &folder_ids {
+            sqlx::query(
+                "DELETE FROM shared_items \
+                 WHERE item_type = 'folder' AND item_id = $1 \
+                   AND shared_by_user_id = $2 AND shared_with_user_id = $3",
+            )
+            .bind(fid)
+            .bind(shared_by_user_id.to_string())
+            .bind(shared_with_user_id.to_string())
+            .execute(pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to delete folder share: {e}")))?;
+        }
+
+        // Delete the file share for (sharer, recipient) for every file inside
+        // the subtree.
+        if !folder_id_list.is_empty() {
+            let placeholders: Vec<String> = folder_id_list
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("${}", i + 1))
+                .collect();
+            let sql = format!(
+                "DELETE FROM shared_items \
+                 WHERE item_id::text IN ( \
+                     SELECT id::text FROM user_files \
+                     WHERE folder_id::text IN ({}) \
+                       AND deleted_at IS NULL \
+                 ) \
+                   AND item_type = 'file' \
+                   AND shared_by_user_id = ${} AND shared_with_user_id = ${}",
+                placeholders.join(", "),
+                folder_id_list.len() + 1,
+                folder_id_list.len() + 2,
+            );
+            let mut query = sqlx::query(&sql);
+            for fid in &folder_id_list {
+                query = query.bind(fid);
+            }
+            query
+                .bind(shared_by_user_id.to_string())
+                .bind(shared_with_user_id.to_string())
+                .execute(pool)
+                .await
+                .map_err(|e| AppError::Internal(format!("failed to delete file shares: {e}")))?;
+        }
+
+        Ok(())
     }
 
     /// Delete all shares for a given item (used when an item is deleted).
@@ -257,8 +371,9 @@ impl ShareRepository {
             SharedItemType::Folder,
             folder_id,
         );
-        let _ = Self::create(pool, data).await;
-        count += 1;
+        if let Ok(true) = Self::create(pool, data).await {
+            count += 1;
+        }
 
         // Find all descendant folder IDs via recursive CTE
         let descendant_ids: Vec<(String,)> = sqlx::query_as(
@@ -284,8 +399,9 @@ impl ShareRepository {
                 SharedItemType::Folder,
                 desc_uuid,
             );
-            let _ = Self::create(pool, data).await;
-            count += 1;
+            if let Ok(true) = Self::create(pool, data).await {
+                count += 1;
+            }
         }
 
         // Share all files in the entire folder tree
@@ -317,8 +433,9 @@ impl ShareRepository {
                 SharedItemType::File,
                 file_uuid,
             );
-            let _ = Self::create(pool, data).await;
-            count += 1;
+            if let Ok(true) = Self::create(pool, data).await {
+                count += 1;
+            }
         }
 
         Ok(count)

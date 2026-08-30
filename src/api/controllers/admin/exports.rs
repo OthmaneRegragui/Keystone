@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
 
@@ -7,7 +7,9 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use bytes::Bytes;
 use chrono::Utc;
+use futures::TryStreamExt;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -52,7 +54,14 @@ fn build_folder_paths(
     for f in folders {
         let mut segments = Vec::new();
         let mut current_id = Some(f.id.as_str());
+        // Guard against parent_id cycles, which would otherwise loop forever
+        // (a folder that is its own ancestor via a corrupted tree). We only
+        // permit each folder along an ancestral chain once.
+        let mut visited: HashSet<String> = HashSet::new();
         while let Some(cid) = current_id {
+            if !visited.insert(cid.to_string()) {
+                break;
+            }
             if let Some((name, parent)) = map.get(cid) {
                 segments.push(name.to_string());
                 current_id = *parent;
@@ -73,7 +82,12 @@ fn resolve_folder_path(
 ) -> String {
     let mut segments = Vec::new();
     let mut current = Some(folder_id.to_string());
+    // Guard against parent_id cycles so a corrupted tree cannot loop forever.
+    let mut visited: HashSet<String> = HashSet::new();
     while let Some(ref cid) = current {
+        if !visited.insert(cid.clone()) {
+            break;
+        }
         if let Some((name, parent)) = folder_map.get(cid) {
             segments.push(name.clone());
             current = parent.clone();
@@ -240,131 +254,77 @@ pub async fn export_bucket_zip(
             .push(fp);
     }
 
-    // Build the ZIP in memory
-    let mut buf = Vec::new();
-    {
-        let mut zip_writer = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated)
-            .unix_permissions(0o644);
+    // Stream the archive to the client. The ZIP is written to a temporary file
+    // on disk (the writer needs a seekable sink) rather than being buffered
+    // wholesale in RAM, so an admin exporting a very large bucket cannot
+    // exhaust server memory. A background task emits the file's bytes through a
+    // bounded channel, and the response body streams them to the client.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
 
-        // Track which directories have been created to avoid duplicates
-        let mut created_dirs: HashMap<String, bool> = HashMap::new();
+    let task_state = state.clone();
+    let task_bucket = bucket_name.clone();
+    let task_user = auth.username.clone();
+    let task_file_rows = file_rows;
+    let task_user_folders_set = user_folders_set;
+    let task_folder_map = folder_map;
 
-        // Macro-like helper to ensure a directory entry exists in the zip
-        // We use a local fn since closures can't borrow zip_writer while it's also used directly
-        fn ensure_dir_in_zip(
-            zip: &mut zip::ZipWriter<std::io::Cursor<&mut Vec<u8>>>,
-            dirs: &mut HashMap<String, bool>,
-            path: &str,
-            opts: zip::write::SimpleFileOptions,
-        ) -> AppResult<()> {
-            if !dirs.contains_key(path) {
-                let dir_path = if path.ends_with('/') {
-                    path.to_string()
-                } else {
-                    format!("{}/", path)
-                };
-                zip.add_directory(&dir_path, opts)
-                    .map_err(|e| AppError::Internal(format!("failed to add directory to zip: {e}")))?;
-                dirs.insert(path.to_string(), true);
+    tokio::spawn(async move {
+        let mut tmpfile = match tempfile::NamedTempFile::new() {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("export: cannot create temp file for bucket '{task_bucket}': {e}");
+                return;
             }
-            Ok(())
+        };
+
+        let (exported, _total_bytes) = match write_bucket_zip(
+            &task_state,
+            &task_bucket,
+            &task_file_rows,
+            &task_user_folders_set,
+            &task_folder_map,
+            tmpfile.as_file_mut(),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("export: failed to build zip for bucket '{task_bucket}': {e}");
+                return;
+            }
+        };
+
+        // Rewind and stream the completed archive to the client in bounded chunks.
+        use std::io::{Read, Seek};
+        if let Err(e) = tmpfile.as_file_mut().seek(std::io::SeekFrom::Start(0)) {
+            warn!("export: cannot rewind temp file for '{task_bucket}': {e}");
+            return;
         }
-
-        // First, create empty folder entries for each user
-        for (user_id, folder_paths) in &user_folders_set {
-            let user = match UserRepository::find_by_id(state.db.pool(), Uuid::parse_str(user_id).unwrap_or_default()).await {
-                Ok(Some(u)) => u,
-                _ => continue,
+        let file = tmpfile.as_file_mut();
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut sent = 0u64;
+        loop {
+            let n = match file.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
             };
-            for fp in folder_paths {
-                let dir_path = format!("{}/{}/{}", bucket_name, user.username, fp);
-                if !zip_entry_name_ok(&dir_path) {
-                    warn!("export: skipping folder entry '{dir_path}' (invalid path components)");
-                    continue;
-                }
-                ensure_dir_in_zip(&mut zip_writer, &mut created_dirs, &dir_path, options)?;
+            let chunk = Bytes::copy_from_slice(&buf[..n]);
+            if tx.blocking_send(Ok(chunk)).is_err() {
+                break; // client disconnected
             }
+            sent += n as u64;
         }
+        info!(
+            "admin {} exported bucket '{}' as ZIP ({} files, {} bytes)",
+            task_user, task_bucket, exported, sent
+        );
+    });
 
-        // Now process each file
-        for row in &file_rows {
-            let user = match UserRepository::find_by_id(
-                state.db.pool(),
-                Uuid::parse_str(&row.user_id).unwrap_or_default(),
-            )
-            .await
-            {
-                Ok(Some(u)) => u,
-                _ => continue,
-            };
-
-            // Resolve folder path
-            let folder_path = row
-                .folder_id
-                .as_ref()
-                .map(|fid| resolve_folder_path(fid, &folder_map));
-
-            // Build zip entry path: bucket_name / username / [folder_path] / file_name
-            let entry_path = match &folder_path {
-                Some(fp) => format!("{}/{}/{}/{}", bucket_name, user.username, fp, row.original_name),
-                None => format!("{}/{}/{}", bucket_name, user.username, row.original_name),
-            };
-
-            // Defense-in-depth: legacy DB rows may hold names that are not
-            // valid path components; those must never reach the archive.
-            if !zip_entry_name_ok(&entry_path) {
-                warn!(
-                    "export: skipping '{}' (invalid path components)",
-                    entry_path
-                );
-                continue;
-            }
-
-            // Ensure directory exists
-            if let Some(parent) = std::path::Path::new(&entry_path).parent() {
-                let parent_str = parent.to_string_lossy().replace('\\', "/");
-                ensure_dir_in_zip(&mut zip_writer, &mut created_dirs, &parent_str, options)?;
-            }
-
-            // Read physical file data from storage backend
-            let file_id = Uuid::parse_str(&row.file_id).unwrap_or_default();
-            let storage_objects =
-                StorageObjectRepository::find_by_file_id(state.db.pool(), file_id).await?;
-            let storage_obj = match storage_objects.first() {
-                Some(obj) => obj,
-                None => continue,
-            };
-
-            let backend = {
-                let storage = state.storage.read().await;
-                storage
-                    .get(&storage_obj.backend)
-                    .ok_or_else(|| AppError::Internal(format!("storage backend '{}' not found", storage_obj.backend)))?
-            };
-
-            let data = match backend.get(&storage_obj.storage_path).await {
-                Ok(Some(d)) => d,
-                _ => continue,
-            };
-
-            // Add file to zip
-            zip_writer
-                .start_file(&entry_path, options)
-                .map_err(|e| AppError::Internal(format!("failed to start zip entry: {e}")))?;
-            zip_writer
-                .write_all(&data)
-                .map_err(|e| AppError::Internal(format!("failed to write zip entry: {e}")))?;
-        }
-
-        // Finalize zip
-        zip_writer
-            .finish()
-            .map_err(|e| AppError::Internal(format!("failed to finalize zip: {e}")))?;
-    }
-
-    let zip_bytes: Vec<u8> = buf;
+    // The response body streams the channel's contents. Content-Length is
+    // intentionally omitted so the connection uses chunked transfer encoding.
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+    let body = Body::from_stream(stream);
 
     let zip_filename = format!("{}.zip", bucket_name);
     let mut headers = HeaderMap::new();
@@ -380,15 +340,146 @@ pub async fn export_bucket_zip(
             .parse()
             .map_err(|_| AppError::Internal("invalid content-disposition header".into()))?,
     );
-    headers.insert("content-length", zip_bytes.len().into());
 
-    info!(
-        "admin {} exported bucket '{}' as ZIP ({} files, {} bytes)",
-        auth.username,
-        bucket_name,
-        file_rows.len(),
-        zip_bytes.len()
-    );
+    Ok((StatusCode::OK, headers, body).into_response())
+}
 
-    Ok((StatusCode::OK, headers, Body::from(zip_bytes)).into_response())
+/// Build a ZIP archive of a bucket into `file`. Returns the number of files
+/// written and their total byte size. `file` must start empty and is left
+/// positioned at the end of the archive.
+async fn write_bucket_zip(
+    state: &Arc<AppState>,
+    bucket_name: &str,
+    file_rows: &[UserFileExportRow],
+    user_folders_set: &HashMap<String, Vec<String>>,
+    folder_map: &HashMap<String, (String, Option<String>)>,
+    file: &mut std::fs::File,
+) -> AppResult<(usize, u64)> {
+    let mut zip_writer = zip::ZipWriter::new(std::io::BufWriter::new(file));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .unix_permissions(0o644);
+
+    // Track which directories have been created to avoid duplicates
+    let mut created_dirs: HashMap<String, bool> = HashMap::new();
+
+    // Macro-like helper to ensure a directory entry exists in the zip
+    // We use a local fn since closures can't borrow zip_writer while it's also used directly
+    fn ensure_dir_in_zip(
+        zip: &mut zip::ZipWriter<std::io::BufWriter<&mut std::fs::File>>,
+        dirs: &mut HashMap<String, bool>,
+        path: &str,
+        opts: zip::write::SimpleFileOptions,
+    ) -> AppResult<()> {
+        if !dirs.contains_key(path) {
+            let dir_path = if path.ends_with('/') {
+                path.to_string()
+            } else {
+                format!("{}/", path)
+            };
+            zip.add_directory(&dir_path, opts)
+                .map_err(|e| AppError::Internal(format!("failed to add directory to zip: {e}")))?;
+            dirs.insert(path.to_string(), true);
+        }
+        Ok(())
+    }
+
+    // First, create empty folder entries for each user
+    for (user_id, folder_paths) in user_folders_set {
+        let user = match UserRepository::find_by_id(state.db.pool(), Uuid::parse_str(user_id).unwrap_or_default()).await {
+            Ok(Some(u)) => u,
+            _ => continue,
+        };
+        for fp in folder_paths {
+            let dir_path = format!("{}/{}/{}", bucket_name, user.username, fp);
+            if !zip_entry_name_ok(&dir_path) {
+                warn!("export: skipping folder entry '{dir_path}' (invalid path components)");
+                continue;
+            }
+            ensure_dir_in_zip(&mut zip_writer, &mut created_dirs, &dir_path, options)?;
+        }
+    }
+
+    // Now process each file
+    let mut exported = 0usize;
+    let mut total_bytes = 0u64;
+    for row in file_rows {
+        let user = match UserRepository::find_by_id(
+            state.db.pool(),
+            Uuid::parse_str(&row.user_id).unwrap_or_default(),
+        )
+        .await
+        {
+            Ok(Some(u)) => u,
+            _ => continue,
+        };
+
+        // Resolve folder path
+        let folder_path = row
+            .folder_id
+            .as_ref()
+            .map(|fid| resolve_folder_path(fid, folder_map));
+
+        // Build zip entry path: bucket_name / username / [folder_path] / file_name
+        let entry_path = match &folder_path {
+            Some(fp) => format!("{}/{}/{}/{}", bucket_name, user.username, fp, row.original_name),
+            None => format!("{}/{}/{}", bucket_name, user.username, row.original_name),
+        };
+
+        // Defense-in-depth: legacy DB rows may hold names that are not
+        // valid path components; those must never reach the archive.
+        if !zip_entry_name_ok(&entry_path) {
+            warn!(
+                "export: skipping '{}' (invalid path components)",
+                entry_path
+            );
+            continue;
+        }
+
+        // Ensure directory exists
+        if let Some(parent) = std::path::Path::new(&entry_path).parent() {
+            let parent_str = parent.to_string_lossy().replace('\\', "/");
+            ensure_dir_in_zip(&mut zip_writer, &mut created_dirs, &parent_str, options)?;
+        }
+
+        // Read physical file data from storage backend
+        let file_id = Uuid::parse_str(&row.file_id).unwrap_or_default();
+        let storage_objects =
+            StorageObjectRepository::find_by_file_id(state.db.pool(), file_id).await?;
+        let storage_obj = match storage_objects.first() {
+            Some(obj) => obj,
+            None => continue,
+        };
+
+        let backend = {
+            let storage = state.storage.read().await;
+            storage
+                .get(&storage_obj.backend)
+                .ok_or_else(|| AppError::Internal(format!("storage backend '{}' not found", storage_obj.backend)))?
+        };
+
+        let data = match backend.get(&storage_obj.storage_path).await {
+            Ok(Some(d)) => d,
+            _ => continue,
+        };
+
+        // Add file to zip
+        zip_writer
+            .start_file(&entry_path, options)
+            .map_err(|e| AppError::Internal(format!("failed to start zip entry: {e}")))?;
+        zip_writer
+            .write_all(&data)
+            .map_err(|e| AppError::Internal(format!("failed to write zip entry: {e}")))?;
+        exported += 1;
+        total_bytes += data.len() as u64;
+    }
+
+    // Finalize zip and flush the buffered writer to disk.
+    let _ = zip_writer
+        .finish()
+        .map_err(|e| AppError::Internal(format!("failed to finalize zip: {e}")))?
+        .flush()
+        .map_err(|e| AppError::Internal(format!("failed to flush zip: {e}")))?;
+
+    Ok((exported, total_bytes))
 }

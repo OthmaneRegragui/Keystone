@@ -79,10 +79,16 @@ pub async fn create_admin_api_key(
         ));
     }
     // Cap the duration: chrono's Duration overflows (panic) for huge day
-    // counts (see the user-facing create_api_key for the same guard).
+    // counts (see the user-facing create_api_key for the same guard). A zero
+    // lifetime would mint an instantly-expired key.
     if body.expires_in_days.is_some_and(|d| d > 3650) {
         return Err(AppError::BadRequest(
             "expires_in_days must not exceed 3650".into(),
+        ));
+    }
+    if body.expires_in_days.is_some_and(|d| d < 1) {
+        return Err(AppError::BadRequest(
+            "expires_in_days must be at least 1".into(),
         ));
     }
 

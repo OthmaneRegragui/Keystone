@@ -211,9 +211,14 @@ impl UserRepository {
                 "charge_storage requires a non-negative delta".into(),
             ));
         }
+        // A quota value <= 0 means "unlimited" (matches `has_storage_available`
+        // and the admin UI's "0 = unlimited"). Without this branch, admin-created
+        // users (default quota 0) could never upload anything because the
+        // predicate `storage_used + $1 <= storage_quota` is always false for
+        // quota 0.
         let affected = sqlx::query(
             "UPDATE users SET storage_used = storage_used + $1, updated_at = $2 \
-             WHERE id = $3 AND storage_used + $1 <= storage_quota",
+             WHERE id = $3 AND (storage_quota <= 0 OR storage_used + $1 <= storage_quota)",
         )
         .bind(delta)
         .bind(Utc::now().to_rfc3339())

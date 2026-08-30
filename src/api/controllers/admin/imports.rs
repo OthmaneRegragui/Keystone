@@ -657,20 +657,47 @@ pub async fn import_bucket_index(
                 bucket_name: Some(bucket_name.clone()),
                 folder_id,
             };
+            let row_id = user_file_record.id;
 
             match UserFileRepository::create(state.db.pool(), user_file_record).await {
                 Ok(_) => {
                     // Charge the user's storage with the REAL blob size — the
                     // size in the JSON is client-controlled and must not drive
                     // storage accounting. Atomic so concurrent imports cannot
-                    // lose updates.
-                    let _ = UserRepository::charge_storage(
+                    // lose updates. Enforce the quota: if the reservation is
+                    // rejected, remove the row we just created so no ghost
+                    // reference is left.
+                    match UserRepository::charge_storage(
                         state.db.pool(),
                         user.id,
                         existing_file.size,
                     )
-                    .await;
-                    result.files_imported += 1;
+                    .await
+                    {
+                        Ok(true) => {
+                            result.files_imported += 1;
+                        }
+                        Ok(false) => {
+                            let _ = UserFileRepository::hard_delete_by_id(
+                                state.db.pool(), row_id,
+                            )
+                            .await;
+                            result.errors.push(format!(
+                                "user '{}': file '{}': storage quota exceeded",
+                                user_dto.username, file_dto.name
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = UserFileRepository::hard_delete_by_id(
+                                state.db.pool(), row_id,
+                            )
+                            .await;
+                            result.errors.push(format!(
+                                "user '{}': file '{}': quota charge error: {e}",
+                                user_dto.username, file_dto.name
+                            ));
+                        }
+                    }
                 }
                 Err(e) => {
                     result.errors.push(format!(
@@ -1056,7 +1083,10 @@ pub async fn import_bucket_combined(
             }
 
             // Check for soft-deleted entry with same triple — restore
-            let created_new = match UserFileRepository::find_deleted_by_user_file_and_name(
+            // `created_row_id` is set only when we insert a brand-new row, so a
+            // later quota failure can roll that row back without a ghost.
+            let mut created_row_id = None;
+            let restored_id = match UserFileRepository::find_deleted_by_user_file_and_name(
                 state.db.pool(), user.id, existing_file.id, &file_dto.name,
             ).await {
                 Ok(Some(deleted_uf)) => {
@@ -1070,7 +1100,7 @@ pub async fn import_bucket_combined(
                             Some(bucket_name.clone()), folder_id,
                         ).await;
                     }
-                    false
+                    Some(deleted_uf.id)
                 }
                 Ok(None) => {
                     // The name comes from client JSON — apply the same component
@@ -1092,14 +1122,18 @@ pub async fn import_bucket_combined(
                         bucket_name: Some(bucket_name.clone()),
                         folder_id,
                     };
+                    let new_row_id = user_file_record.id;
                     match UserFileRepository::create(state.db.pool(), user_file_record).await {
-                        Ok(_) => true,
+                        Ok(_) => {
+                            created_row_id = Some(new_row_id);
+                            None
+                        }
                         Err(e) => {
                             result.errors.push(format!(
                                 "user '{}': file '{}': insert error: {e}",
                                 user_dto.username, file_dto.name
                             ));
-                            false
+                            None
                         }
                     }
                 }
@@ -1108,19 +1142,48 @@ pub async fn import_bucket_combined(
                         "user '{}': file '{}': db error: {e}",
                         user_dto.username, file_dto.name
                     ));
-                    false
+                    None
                 }
             };
 
-            if created_new {
+            // A row was either restored or freshly created — account for it.
+            if restored_id.is_some() || created_row_id.is_some() {
                 // Charge the user's storage with the REAL blob size — the
                 // size in the JSON is client-controlled and must not drive
                 // storage accounting. Atomic so concurrent imports cannot
-                // lose updates.
-                let _ = UserRepository::charge_storage(
+                // lose updates. Enforce the quota: on a rejected reservation,
+                // roll back a freshly created row so no ghost reference is left.
+                match UserRepository::charge_storage(
                     state.db.pool(), user.id, existing_file.size,
-                ).await;
-                result.files_imported += 1;
+                ).await {
+                    Ok(true) => {
+                        result.files_imported += 1;
+                    }
+                    Ok(false) => {
+                        if let Some(row_id) = created_row_id {
+                            let _ = UserFileRepository::hard_delete_by_id(
+                                state.db.pool(), row_id,
+                            )
+                            .await;
+                        }
+                        result.errors.push(format!(
+                            "user '{}': file '{}': storage quota exceeded",
+                            user_dto.username, file_dto.name
+                        ));
+                    }
+                    Err(e) => {
+                        if let Some(row_id) = created_row_id {
+                            let _ = UserFileRepository::hard_delete_by_id(
+                                state.db.pool(), row_id,
+                            )
+                            .await;
+                        }
+                        result.errors.push(format!(
+                            "user '{}': file '{}': quota charge error: {e}",
+                            user_dto.username, file_dto.name
+                        ));
+                    }
+                }
             }
         }
     }
@@ -1193,92 +1256,124 @@ async fn import_file_data(
 
     let hash = hash_bytes(&data).await;
 
-    // Check for deduplication
-    let existing_file = FileRepository::find_by_hash(state.db.pool(), &hash).await?;
-
-    let file_id = if let Some(ref existing) = existing_file {
-        // Blob already exists — increment ref count
-        FileRepository::update_ref_count(state.db.pool(), existing.id, 1).await?;
-        existing.id
-    } else {
-        // New blob — store it
-        let storage_key = format!("{}/{}/{}", &hash[..2], &hash[2..4], hash);
-
-        {
-            let storage = state.storage.read().await;
-            let backend = storage
-                .get(backend_name)
-                .ok_or_else(|| AppError::Internal(format!("storage backend '{}' not found", backend_name)))?;
-            backend
-                .put(&storage_key, data.clone())
-                .await
-                .map_err(|e| AppError::Internal(format!("failed to store blob: {e}")))?;
-        }
-
-        let file_record = FileRecord::new(hash.clone(), storage_key.clone(), mime_type.map(|s| s.to_string()), data.len() as i64);
-        let file = FileRepository::create(state.db.pool(), file_record).await?;
-
-        // Create storage object mapping
-        let storage_obj = CreateStorageObjectData {
-            file_id: file.id,
-            backend: backend_name.to_string(),
-            storage_path: storage_key,
-        };
-        StorageObjectRepository::create(state.db.pool(), storage_obj).await?;
-
-        file.id
-    };
-
-    // Create user_file entry — handle duplicates
-    // Check for an existing active user_file with the same (user_id, file_id, original_name)
-    if let Some(active_uf) = UserFileRepository::find_by_user_and_file(
-        state.db.pool(), user_id, file_id,
-    ).await? {
-        // A user_file for this (user_id, file_id) already exists.
-        // The UNIQUE constraint is (user_id, file_id, original_name), so if original_name
-        // also matches, skip entirely (idempotent). Otherwise try to insert.
-        if active_uf.original_name == file_name {
-            // Already linked with same original name — skip
-            return Ok(hash);
-        }
-    }
-
-    // Check for a soft-deleted entry with the same triple — restore it
-    if let Some(deleted_uf) = UserFileRepository::find_deleted_by_user_file_and_name(
-        state.db.pool(), user_id, file_id, file_name,
-    ).await? {
-        UserFileRepository::restore(state.db.pool(), deleted_uf.id).await?;
-        // Update bucket/folder if changed
-        if deleted_uf.bucket_name.as_deref() != Some(bucket_name)
-            || deleted_uf.folder_id != folder_id
-        {
-            UserFileRepository::update_bucket_and_folder(
-                state.db.pool(), deleted_uf.id,
-                Some(bucket_name.to_string()), folder_id,
-            ).await?;
-        }
-    } else {
-        // No existing entry — create a new one
-        let user_file_record = UserFileRecord {
-            id: Uuid::new_v4(),
-            user_id,
-            file_id,
-            original_name: file_name.to_string(),
-            mime_type: mime_type.map(|s| s.to_string()),
-            bucket_name: Some(bucket_name.to_string()),
-            folder_id,
-        };
-        UserFileRepository::create(state.db.pool(), user_file_record).await?;
-    }
-
-    // Charge user storage with the REAL blob size — the size in the JSON is
-    // client-controlled and must not drive storage accounting. Atomic so
-    // concurrent imports cannot lose updates.
+    // Reserve the storage quota up front, atomically, BEFORE any blob, user_file
+    // row, or ref_count bump is created. A quota failure therefore aborts with
+    // no committed state and no accounting drift. If a later step fails we
+    // release the reservation (and undo any ref_count bump) below.
     if !UserRepository::charge_storage(state.db.pool(), user_id, data.len() as i64).await? {
         return Err(AppError::BadRequest(format!(
             "storage quota exceeded for user {user_id}"
         )));
     }
 
-    Ok(hash)
+    // Track side effects so a downstream failure can roll them back.
+    // `bumped_file_id` is set (on the dedup path) when we incremented an
+    // existing blob's ref_count; `created_file_row` marks a fresh `files` row.
+    let mut bumped_file_id: Option<Uuid> = None;
+    let mut created_file_row = false;
+
+    let outcome = (async {
+        // Check for deduplication
+        let existing_file = FileRepository::find_by_hash(state.db.pool(), &hash).await?;
+
+        let file_id = if let Some(ref existing) = existing_file {
+            // Blob already exists — increment ref count
+            FileRepository::update_ref_count(state.db.pool(), existing.id, 1).await?;
+            bumped_file_id = Some(existing.id);
+            existing.id
+        } else {
+            // New blob — store it
+            let storage_key = format!("{}/{}/{}", &hash[..2], &hash[2..4], hash);
+
+            {
+                let storage = state.storage.read().await;
+                let backend = storage
+                    .get(backend_name)
+                    .ok_or_else(|| AppError::Internal(format!("storage backend '{}' not found", backend_name)))?;
+                backend
+                    .put(&storage_key, data.clone())
+                    .await
+                    .map_err(|e| AppError::Internal(format!("failed to store blob: {e}")))?;
+            }
+
+            let file_record = FileRecord::new(hash.clone(), storage_key.clone(), mime_type.map(|s| s.to_string()), data.len() as i64);
+            let file = FileRepository::create(state.db.pool(), file_record).await?;
+            created_file_row = true;
+
+            // Create storage object mapping
+            let storage_obj = CreateStorageObjectData {
+                file_id: file.id,
+                backend: backend_name.to_string(),
+                storage_path: storage_key,
+            };
+            StorageObjectRepository::create(state.db.pool(), storage_obj).await?;
+
+            file.id
+        };
+
+        // Create user_file entry — handle duplicates
+        // Check for an existing active user_file with the same (user_id, file_id, original_name)
+        if let Some(active_uf) = UserFileRepository::find_by_user_and_file(
+            state.db.pool(), user_id, file_id,
+        ).await? {
+            // A user_file for this (user_id, file_id) already exists.
+            // The UNIQUE constraint is (user_id, file_id, original_name), so if original_name
+            // also matches, skip entirely (idempotent). Otherwise try to insert.
+            if active_uf.original_name == file_name {
+                // Already linked with same original name — skip
+                return Ok(file_id);
+            }
+        }
+
+        // Check for a soft-deleted entry with the same triple — restore it
+        if let Some(deleted_uf) = UserFileRepository::find_deleted_by_user_file_and_name(
+            state.db.pool(), user_id, file_id, file_name,
+        ).await? {
+            UserFileRepository::restore(state.db.pool(), deleted_uf.id).await?;
+            // Update bucket/folder if changed
+            if deleted_uf.bucket_name.as_deref() != Some(bucket_name)
+                || deleted_uf.folder_id != folder_id
+            {
+                UserFileRepository::update_bucket_and_folder(
+                    state.db.pool(), deleted_uf.id,
+                    Some(bucket_name.to_string()), folder_id,
+                ).await?;
+            }
+        } else {
+            // No existing entry — create a new one
+            let user_file_record = UserFileRecord {
+                id: Uuid::new_v4(),
+                user_id,
+                file_id,
+                original_name: file_name.to_string(),
+                mime_type: mime_type.map(|s| s.to_string()),
+                bucket_name: Some(bucket_name.to_string()),
+                folder_id,
+            };
+            UserFileRepository::create(state.db.pool(), user_file_record).await?;
+        }
+
+        Ok(file_id)
+    })
+    .await;
+
+    match outcome {
+        Ok(_file_id) => Ok(hash),
+        Err(e) => {
+            // Roll back the quota reservation taken above.
+            let _ = UserRepository::release_storage(
+                state.db.pool(), user_id, data.len() as i64,
+            )
+            .await;
+            // Undo a ref_count bump on the dedup path so a failed import does
+            // not leave the physical blob with an extra reference but no new
+            // user_files row. A freshly created `files` row is left as an
+            // unreferenced blob, which the orphan-cleanup path already handles.
+            if let Some(fid) = bumped_file_id {
+                let _ = FileRepository::update_ref_count(state.db.pool(), fid, -1).await;
+            }
+            let _ = created_file_row;
+            Err(e)
+        }
+    }
 }

@@ -8,7 +8,7 @@ use crate::db::repos::{
     AdminSettingRepository, ApiKeyRepository, GroupRepository,
 };
 use crate::api::extractors::AuthUser;
-use crate::api::validators::validate_scopes;
+use crate::api::validators::validate_user_scopes;
 use crate::dto::*;
 use tracing::info;
 use uuid::Uuid;
@@ -78,7 +78,9 @@ pub async fn create_user_api_key(
     if body.name.trim().is_empty() || body.name.chars().count() > 100 {
         return Err(AppError::BadRequest("key name must be 1..=100 characters".into()));
     }
-    if body.scopes.len() > 10 || !validate_scopes(&body.scopes) {
+    // Self-service keys may only carry file scopes (not `admin`/`users:*`), so
+    // a leaked key can never be minted with elevated authority.
+    if body.scopes.len() > 10 || !validate_user_scopes(&body.scopes) {
         return Err(AppError::BadRequest(
             "one or more scopes are not allowed".into(),
         ));
@@ -88,6 +90,13 @@ pub async fn create_user_api_key(
     if body.expires_in_days.is_some_and(|d| d > 3650) {
         return Err(AppError::BadRequest(
             "expires_in_days must not exceed 3650".into(),
+        ));
+    }
+    // A zero/negative lifetime would mint an instantly-expired key; require a
+    // positive lifetime when one is supplied.
+    if body.expires_in_days.is_some_and(|d| d < 1) {
+        return Err(AppError::BadRequest(
+            "expires_in_days must be at least 1".into(),
         ));
     }
 
