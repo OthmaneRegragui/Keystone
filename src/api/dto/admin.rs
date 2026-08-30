@@ -335,6 +335,32 @@ pub struct AdminApiKeyDto {
     pub is_active: bool,
 }
 
+// ─── Software Update ─────────────────────────────────────────
+
+/// Details about the newest published release (from GitHub).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateReleaseDto {
+    pub tag: String,
+    pub name: String,
+    pub url: String,
+    pub published_at: Option<String>,
+    pub is_prerelease: bool,
+}
+
+/// Result of checking for a newer Keystone release.
+#[derive(Debug, Serialize)]
+pub struct UpdateCheckDto {
+    /// Version of the currently running server (e.g. "0.4.0").
+    pub current_version: String,
+    /// The newest release found, if the update source could be reached.
+    pub latest: Option<UpdateReleaseDto>,
+    /// True when `latest` is set and newer than `current_version`.
+    pub update_available: bool,
+    /// Human-readable error when the check failed (e.g. GitHub unreachable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct AdminBotDto {
     pub id: String,

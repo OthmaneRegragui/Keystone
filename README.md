@@ -425,6 +425,24 @@ Recomputes the BLAKE3 hash and compares to the stored hash.
 ```
 `null` moves to the bucket root. **Response (200):** `{ "message": "file moved" }`
 
+#### POST `/api/files/:id/copy` — Copy File
+Copies the file into another folder within the same bucket (content-addressed, so no new blob is stored unless the target differs).
+```json
+{ "folder_id": "uuid | null", "bucket_name"?: "target-bucket" }
+```
+`null` copies to the bucket root. **Response (200):** `{ "file": { ... }, "duplicate": false }`
+
+#### Batch Operations
+`file_ids` may list files from different buckets; when only files from one bucket are given, `bucket_name` is optional.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/files/batch-move` | `{ "file_ids": [...], "folder_id"?, "bucket_name"? }` |
+| POST | `/api/files/batch-copy` | `{ "file_ids": [...], "folder_id"?, "bucket_name"? }` |
+| POST | `/api/files/batch-delete` | `{ "file_ids": [...] }` |
+
+Each batch endpoint returns `{ "success": n, "failed": n, "errors": ["..."] }`.
+
 #### DELETE `/api/files/:id` — Delete File
 Removes the user's reference; the physical blob is only deleted when `ref_count` reaches 0. **Response (200):** `{ "message": "file 'document.pdf' deleted" }`
 
@@ -447,6 +465,12 @@ Resolves a slash path (e.g. `/test/hello`) to a folder id for deep linking. `/` 
 ```json
 { "name": "New Name" }
 ```
+
+#### POST `/api/folders/:id/move` — Move Folder
+```json
+{ "parent_id": "uuid | null" }
+```
+`null` moves to the bucket root. **Response (200):** `{ "message": "folder moved" }`
 
 #### DELETE `/api/folders/:id` — Delete Folder
 Children (subfolders and files) are moved to the parent (or bucket root). **Response (200):** `{ "message": "folder 'Documents' deleted" }`
@@ -544,7 +568,10 @@ Requests and responses are identical to the corresponding `/api/*` endpoints abo
 |--------|------|---------|
 | GET | `/api/admin/stats` | `{ total_users, total_files, total_buckets, total_groups, block_registrations, active_user_files, active_user_files_size, deleted_user_files, deleted_user_files_size, orphaned_physical_files, orphaned_physical_files_size }` |
 | GET | `/api/admin/settings` | `{ block_registrations, allow_user_api_keys, allow_user_bots, allow_user_password_change, allow_user_sharing }` |
-| PUT | `/api/admin/settings` | Update setting: `{ "key": "allow_user_api_keys", "value": "true" }` — keys: `block_registrations`, `allow_user_api_keys`, `allow_user_bots`, `allow_user_password_change`, `allow_user_sharing` (`"true"`/`"false"`), `default_bucket` (bucket name) |
+| PUT | `/api/admin/settings` | Update setting: `{ "key": "allow_user_api_keys", "value": "true" }` — keys: `block_registrations`, `allow_user_api_keys`, `allow_user_bots`, `allow_user_password_change`, `allow_user_sharing` (`"true"`/`"false"`) |
+| GET | `/api/admin/update-check` | Check for a newer release: `{ "current_version", "latest"?, "update_available", "error"? }` — queries the project's GitHub releases API server-side and reports whether a newer version exists |
+
+The admin panel has a dedicated **Updates** tab showing the running version and a **Check for Updates** button that calls this endpoint (server-side, so no CORS/rate-limit concerns for admins). If the GitHub release is newer than the running version, an **Update button** links to the release page; otherwise it reports the server is up to date. The source repo defaults to `OthmaneRegragui/Keystone` and can be overridden with the `KEYSTONE_UPDATE_REPO` env var (`owner/repo`). The check fails soft: an unreachable GitHub or missing release is reported as an `error` string rather than a failed request.
 
 #### Buckets
 | Method | Path | Purpose |
@@ -554,6 +581,41 @@ Requests and responses are identical to the corresponding `/api/*` endpoints abo
 | POST | `/api/admin/buckets/delete` | `{ "name": "archive" }` |
 | PUT | `/api/admin/buckets/visible` | `{ "name": "archive", "visible": true }` — when `visible_to_users`, bucket is accessible to all users |
 | PUT | `/api/admin/buckets/edit` | `{ "original_name", "name", "path", "visible_to_users", "is_active", "storage_limit" }` (name validated) |
+| POST | `/api/admin/buckets/change-path` | Move a bucket to a new on-disk location: `{ "bucket_name", "new_path" }` |
+| GET | `/api/admin/backends` | List storage backends registered for all buckets |
+
+#### Storage Paths
+Storage paths group buckets onto on-disk directories. The current base (first `STORAGE_LOCAL_PATHS` entry) is reported by `storage-base`; new paths are created under it.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/admin/paths` | List all storage paths with file/bucket counts |
+| POST | `/api/admin/paths` | Create a path: `{ "name" }` — resolves to `<base>/<slug>` |
+| DELETE | `/api/admin/paths` | Delete a path: `{ "id" }` |
+| GET | `/api/admin/storage-base` | `{ "env_base" }` — the base directory new paths are created under |
+
+#### Orphaned Files
+Fully orphaned physical files are blobs whose every user reference has been soft-deleted (they waste disk but are invisible to users). Track and reclaim them here.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/admin/orphaned-files?limit=` | `{ total, total_size_bytes, files: [OrphanedFileDto] }` |
+| GET | `/api/admin/orphaned-files/facets` | `{ buckets, users }` — distinct buckets/owners for filtering |
+| GET | `/api/admin/orphaned-files/:id/download` | Download an orphaned file's bytes (attachment) |
+| DELETE | `/api/admin/orphaned-files/:id` | Permanently delete one orphaned physical file |
+| DELETE | `/api/admin/orphaned-files` | Purge all orphaned physical files: `{ "deleted", "failed", "errors" }` |
+
+#### Bucket Export / Import
+Back up or restore a bucket. `export-index` produces a JSON manifest of users/files/folders; `export-zip` bundles that manifest with the file bytes.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/admin/buckets/:name/export-index` | Download `bucket-index.json` manifest |
+| GET | `/api/admin/buckets/:name/export-zip` | Download a ZIP of the manifest + file bytes |
+| POST | `/api/admin/buckets/:name/import-index` | Import a `bucket-index.json` manifest |
+| POST | `/api/admin/buckets/:name/import-file` | Import a single file |
+| POST | `/api/admin/buckets/:name/import-zip` | Import from a ZIP archive |
+| POST | `/api/admin/buckets/:name/import-combined` | Import a ZIP + JSON index together (multipart `zip` + `index`) |
 
 #### Users
 | Method | Path | Purpose |
@@ -569,14 +631,16 @@ Requests and responses are identical to the corresponding `/api/*` endpoints abo
 |--------|------|---------|
 | GET | `/api/admin/groups` | List groups with member/bucket counts |
 | GET | `/api/admin/groups/detail?id=<string>` | Members + linked buckets with permissions |
-| POST | `/api/admin/groups` | Create: `{ "name", "buckets"? }` |
+| POST | `/api/admin/groups` | Create: `{ "name", "buckets"? }` — each bucket: `{ "bucket_id", "user_storage_limit"? }` |
 | DELETE | `/api/admin/groups/delete` | `{ "id" }` |
 | POST | `/api/admin/groups/members` | Add member: `{ "group_id", "user_id" }` |
+| POST | `/api/admin/groups/members/bulk` | Add many members to many groups at once: `{ "user_ids": [...], "group_ids": [...] }` |
 | DELETE | `/api/admin/groups/members/remove` | Remove member: `{ "group_id", "user_id" }` |
-| POST | `/api/admin/groups/buckets` | Link bucket: `{ "group_id", "bucket_name", "user_storage_limit" }` (`0` = unlimited per-user) |
-| DELETE | `/api/admin/groups/buckets/remove` | Unlink bucket: `{ "group_id", "bucket_name" }` |
-| PATCH | `/api/admin/groups/buckets/permissions` | `{ "group_id", "bucket_name", "can_upload", "can_download" }` |
-| PUT | `/api/admin/groups/buckets/user-limit` | `{ "group_id", "bucket_name", "user_storage_limit" }` |
+| POST | `/api/admin/groups/buckets` | Link bucket: `{ "group_id", "bucket_id", "user_storage_limit"? }` (`0` = unlimited per-user) |
+| DELETE | `/api/admin/groups/buckets/remove` | Unlink bucket: `{ "group_id", "bucket_id" }` |
+| PATCH | `/api/admin/groups/buckets/permissions` | `{ "group_id", "bucket_id", "can_upload", "can_download" }` |
+| PUT | `/api/admin/groups/buckets/user-limit` | `{ "group_id", "bucket_id", "user_storage_limit" }` |
+| PUT | `/api/admin/groups/permissions` | Group capability flags: `{ "group_id", "allow_api_keys", "allow_password_change", "allow_bots", "allow_sharing" }` |
 
 #### Admin API Keys
 | Method | Path | Purpose |
@@ -591,7 +655,7 @@ Bots are managed through the UI at `/bots`. Admins see and manage **all** bots; 
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/admin/bots` | List all bot accounts (admin) or the caller's own bots (eligible user) |
-| POST | `/api/admin/bots` | Create a bot: `{ "user_id", "name", "can_upload", "can_download", "can_copy", "can_edit", "can_delete", "can_list", "allowed_buckets", "allowed_folder_ids", "allowed_file_ids", "upload_limit_bytes", "expires_in_days" }` — creates a scoped API key for the bot. Admins may pick any owner; an eligible user always gets a bot for themself |
+| POST | `/api/admin/bots` | Create a bot: `{ "user_id", "name", "can_upload", "can_download", "can_copy", "can_edit", "can_delete", "can_list", "path_rules"?, "upload_limit_bytes"?, "expires_in_days"? }` — creates a scoped API key for the bot. Admins may pick any owner; an eligible user always gets a bot for themself. `path_rules` is an optional list of `{ "bucket", "path", "status": "allow" | "block" }` rows (see [Bot API](#bot-api-only-bot-api-keys)); when present the bucket is fail-closed |
 | PUT | `/api/admin/bots/:id` | Update bot permissions (all fields optional) — admin any bot, eligible user own bots only |
 | DELETE | `/api/admin/bots/:id` | Delete a bot and revoke its key — admin any bot, eligible user own bots only |
 

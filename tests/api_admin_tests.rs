@@ -87,6 +87,27 @@ async fn test_admin_settings_requires_admin() {
     assert_eq!(resp.status(), 403);
 }
 
+// ─── Admin Update Check ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_admin_update_check_requires_admin() {
+    let (app, token, _state, _temp) = setup_user().await;
+    let resp = helpers::get_auth(&app, "/api/admin/update-check", &token).await;
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn test_admin_update_check_returns_current_version() {
+    let (app, token, _state, _temp) = setup_admin().await;
+    let resp = helpers::get_auth(&app, "/api/admin/update-check", &token).await;
+    assert_eq!(resp.status(), 200);
+    let json = helpers::response_json(resp).await;
+    // The running version is always present; whether GitHub is reachable only
+    // affects the `latest`/`error` fields, never the status code.
+    assert!(json.get("current_version").is_some());
+    assert!(json.get("error").is_some() || json.get("latest").is_some());
+}
+
 // ─── Admin Bucket Management ─────────────────────────────────────────────
 
 #[tokio::test]

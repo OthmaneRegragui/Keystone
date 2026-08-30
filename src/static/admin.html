@@ -78,7 +78,7 @@
         }
         function adminPanel() {
             var params = new URLSearchParams(window.location.search);
-            var validTabs = ['overview','paths','buckets','groups','users','settings'];
+            var validTabs = ['overview','paths','buckets','groups','users','settings','updates'];
             var initialTab = validTabs.indexOf(params.get('page')) >= 0 ? params.get('page') : 'overview';
 
             function authHeaders() {
@@ -145,6 +145,8 @@
                 bots: [],
                 botsLoading: false,
                 settings: { block_registrations: true, allow_user_api_keys: false, allow_user_bots: false, allow_user_password_change: false },
+                currentVersion: '__KEYSTONE_VERSION__',
+                update: { checking: false, checked: false, loaded: false, available: false, latest: null, error: '' },
                 users: [],
                 buckets: [],
                 backends: [],
@@ -196,6 +198,10 @@
                     var url = new URL(window.location);
                     url.searchParams.set('page', t);
                     window.history.pushState({}, '', url);
+                    // Auto-check for updates the first time the Updates tab is opened.
+                    if (t === 'updates' && !this.update.checked) {
+                        this.checkUpdate();
+                    }
                 },
                 init: function() {
                     var self = this;
@@ -249,6 +255,51 @@
                         .then(function(r) { return r.json(); })
                         .then(function(d) { self.settings = d; })
                         .catch(function() {});
+                },
+                checkUpdate: function() {
+                    // Ask the server (admin endpoint) for the latest release so
+                    // the check happens server-side; the admin token is already
+                    // valid and there is no CORS/rate-limit concern for a
+                    // logged-in admin.
+                    var self = this;
+                    self.update.checking = true;
+                    self.update.checked = true;
+                    self.update.error = '';
+                    authFetch('/api/admin/update-check')
+                        .then(function(r) {
+                            if (!r.ok) return r.json().then(function(e) { throw new Error(e.detail || e.error || 'Update check failed'); });
+                            return r.json();
+                        })
+                        .then(function(data) {
+                            if (data.error) {
+                                self.update.error = data.error;
+                                self.update.loaded = false;
+                                self.update.latest = null;
+                                self.update.available = false;
+                                self.update.checking = false;
+                                return;
+                            }
+                            self.update.latest = {
+                                tag: data.latest ? data.latest.tag : '',
+                                name: data.latest ? data.latest.name : '',
+                                url: data.latest ? data.latest.url : ''
+                            };
+                            self.update.available = !!data.update_available;
+                            self.update.currentVersion = data.current_version || self.currentVersion;
+                            self.update.loaded = true;
+                            self.update.checking = false;
+                        })
+                        .catch(function(e) {
+                            self.update.error = e.message || 'Failed to check for updates';
+                            self.update.loaded = false;
+                            self.update.latest = null;
+                            self.update.available = false;
+                            self.update.checking = false;
+                        });
+                },
+                get isUpdateAvailable() {
+                    var self = this;
+                    return self.update.loaded && self.update.available;
                 },
                 loadUsers: function() {
                     var self = this;
@@ -893,6 +944,7 @@
                     <button x-on:click="setTab('groups')" :class="tab==='groups' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Groups</button>
                     <button x-on:click="setTab('users')" :class="tab==='users' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Users</button>
                     <button x-on:click="setTab('settings')" :class="tab==='settings' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Settings</button>
+                    <button x-on:click="setTab('updates')" :class="tab==='updates' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Updates</button>
                 </div>
 
                 <!-- Overview Tab -->
@@ -1973,6 +2025,56 @@
                                 </tr>
                             </tbody>
                         </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Updates Tab -->
+                <div x-show="tab==='updates'" class="space-y-6 max-w-3xl">
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                        <div class="px-6 py-4 border-b border-gray-200">
+                            <h3 class="text-lg font-semibold text-gray-900">Software Update</h3>
+                            <p class="text-xs text-gray-500 mt-0.5">Check whether a newer version of Keystone is available and review the latest release.</p>
+                        </div>
+                        <div class="px-6 py-5">
+                            <div class="flex items-center gap-3">
+                                <div class="w-10 h-10 rounded-lg bg-indigo-100 text-indigo-600 flex items-center justify-center shrink-0">
+                                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                                </div>
+                                <div>
+                                    <p class="text-sm font-medium text-gray-900">Current version</p>
+                                    <p class="text-sm text-gray-600">v<span x-text="currentVersion"></span></p>
+                                </div>
+                            </div>
+
+                            <div class="mt-5 flex items-center gap-3">
+                                <button x-on:click="checkUpdate()" :disabled="update.checking" class="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition">
+                                    <svg x-show="update.checking" class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                                    <span x-text="update.checking ? 'Checking...' : 'Check for Updates'"></span>
+                                </button>
+
+                                <template x-if="update.loaded && isUpdateAvailable">
+                                    <a :href="update.latest.url" target="_blank" rel="noopener" class="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition">
+                                        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                                        Update to v<span x-text="update.latest.tag.replace(/^v/, '')"></span>
+                                    </a>
+                                </template>
+                            </div>
+
+                            <div class="mt-4 text-sm" x-show="update.loaded">
+                                <template x-if="isUpdateAvailable">
+                                    <p class="text-green-700 bg-green-50 border border-green-200 rounded-lg px-4 py-3">
+                                        A new version <strong>v<span x-text="update.latest.tag"></span></strong> is available.
+                                        <template x-if="update.latest.name"><span class="text-green-600 block">"<span x-text="update.latest.name"></span>"</span></template>
+                                    </p>
+                                </template>
+                                <template x-if="!isUpdateAvailable">
+                                    <p class="text-green-700 bg-green-50 border border-green-200 rounded-lg px-4 py-3">
+                                        You are running the latest version (<strong>v<span x-text="currentVersion"></span></strong>).
+                                    </p>
+                                </template>
+                            </div>
+                            <p x-show="update.error" class="mt-4 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-4 py-3" x-text="update.error"></p>
                         </div>
                     </div>
                 </div>
