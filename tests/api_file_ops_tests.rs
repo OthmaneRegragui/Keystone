@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use bytes::Bytes;
-use http_body_util::BodyExt;
 use keystone::db::repos::{BucketRepository, GroupRepository};
 use keystone::models::UserRole;
 use keystone::AppState;
@@ -198,7 +197,7 @@ async fn test_move_file_to_root() {
     let (ufid, _fid) = upload_file_in_folder(&app, &token, b"move me", "moveme.txt", "default", &folder_id).await;
 
     // Verify file is in the folder
-    let resp = helpers::get_auth(&app, &format!("/api/folders?bucket=default&parent_id={folder_id}"), &token).await;
+    let resp = helpers::get_auth(&app, &format!("/api/files?bucket=default&folder_id={folder_id}"), &token).await;
     assert_eq!(resp.status(), 200);
     let json = helpers::response_json(resp).await;
     assert_eq!(json["files"].as_array().unwrap().len(), 1);
@@ -214,7 +213,7 @@ async fn test_move_file_to_root() {
     assert_eq!(resp.status(), 200);
 
     // Folder should be empty now
-    let resp = helpers::get_auth(&app, &format!("/api/folders?bucket=default&parent_id={folder_id}"), &token).await;
+    let resp = helpers::get_auth(&app, &format!("/api/files?bucket=default&folder_id={folder_id}"), &token).await;
     assert_eq!(resp.status(), 200);
     let json = helpers::response_json(resp).await;
     assert_eq!(json["files"].as_array().unwrap().len(), 0);
@@ -247,7 +246,7 @@ async fn test_move_file_to_folder() {
     assert_eq!(resp.status(), 200);
 
     // Verify file is in the folder
-    let resp = helpers::get_auth(&app, &format!("/api/folders?bucket=default&parent_id={folder_id}"), &token).await;
+    let resp = helpers::get_auth(&app, &format!("/api/files?bucket=default&folder_id={folder_id}"), &token).await;
     assert_eq!(resp.status(), 200);
     let json = helpers::response_json(resp).await;
     assert_eq!(json["files"].as_array().unwrap().len(), 1);
@@ -366,7 +365,7 @@ async fn test_copy_file_to_folder() {
     assert_eq!(resp.status(), 200);
 
     // Verify copy is in the folder
-    let resp = helpers::get_auth(&app, &format!("/api/folders?bucket=default&parent_id={folder_id}"), &token).await;
+    let resp = helpers::get_auth(&app, &format!("/api/files?bucket=default&folder_id={folder_id}"), &token).await;
     assert_eq!(resp.status(), 200);
     let json = helpers::response_json(resp).await;
     assert_eq!(json["files"].as_array().unwrap().len(), 1);
@@ -526,7 +525,7 @@ async fn test_batch_move_success() {
     assert_eq!(json["failed"], 0);
 
     // Files should be in the folder
-    let resp = helpers::get_auth(&app, &format!("/api/folders?bucket=default&parent_id={folder_id}"), &token).await;
+    let resp = helpers::get_auth(&app, &format!("/api/files?bucket=default&folder_id={folder_id}"), &token).await;
     assert_eq!(resp.status(), 200);
     let json = helpers::response_json(resp).await;
     assert_eq!(json["files"].as_array().unwrap().len(), 2);
@@ -559,8 +558,8 @@ async fn test_batch_copy_success() {
     setup_bucket_access(&state, user_id, "default").await;
     let token = helpers::login_user(&app, &email, &password).await;
 
-    let (ufid1, fid1) = upload_file(&app, &token, b"bc1", "batchcopy1.txt", "default").await;
-    let (ufid2, fid2) = upload_file(&app, &token, b"bc2", "batchcopy2.txt", "default").await;
+    let (ufid1, _fid1) = upload_file(&app, &token, b"bc1", "batchcopy1.txt", "default").await;
+    let (ufid2, _fid2) = upload_file(&app, &token, b"bc2", "batchcopy2.txt", "default").await;
     let folder_id = create_folder(&app, &token, "copydest", "default").await;
 
     let resp = helpers::json_post_auth(
@@ -582,7 +581,7 @@ async fn test_batch_copy_success() {
     assert_eq!(json["total"], 2);
 
     // Copies in folder
-    let resp = helpers::get_auth(&app, &format!("/api/folders?bucket=default&parent_id={folder_id}"), &token).await;
+    let resp = helpers::get_auth(&app, &format!("/api/files?bucket=default&folder_id={folder_id}"), &token).await;
     assert_eq!(resp.status(), 200);
     let json = helpers::response_json(resp).await;
     assert_eq!(json["files"].as_array().unwrap().len(), 2);
@@ -667,9 +666,9 @@ async fn test_verify_file_success() {
     setup_bucket_access(&state, user_id, "default").await;
     let token = helpers::login_user(&app, &email, &password).await;
 
-    let (_ufid, fid) = upload_file(&app, &token, b"verify me", "verify.txt", "default").await;
+    let (ufid, _fid) = upload_file(&app, &token, b"verify me", "verify.txt", "default").await;
 
-    let resp = helpers::get_auth(&app, &format!("/api/files/{fid}/verify"), &token).await;
+    let resp = helpers::get_auth(&app, &format!("/api/files/{ufid}/verify"), &token).await;
     assert_eq!(resp.status(), 200);
     let json = helpers::response_json(resp).await;
     assert_eq!(json["valid"], true);
@@ -718,7 +717,7 @@ async fn test_move_folder_success() {
     assert_eq!(folders[0]["name"], "parent");
 
     // Child should be inside parent
-    let resp = helpers::get_auth(&app, &format!("/api/folders?bucket=default&parent_id={parent_id}"), &token).await;
+    let resp = helpers::get_auth(&app, &format!("/api/folders?bucket=default&folder_id={parent_id}"), &token).await;
     let json = helpers::response_json(resp).await;
     assert_eq!(json["folders"].as_array().unwrap().len(), 1);
     assert_eq!(json["folders"].as_array().unwrap()[0]["name"], "child");
@@ -754,7 +753,12 @@ async fn test_resolve_folder_path() {
 
     let _f = create_folder(&app, &token, "resolve-me", "default").await;
 
-    let resp = helpers::get_auth(&app, "/api/folders/resolve?bucket_id=default&path=/resolve-me", &token).await;
+    // `bucket_id` is a UUID (bucket names would leak through the resolver).
+    let bucket = BucketRepository::find_by_name(state.db.pool(), "default")
+        .await
+        .unwrap()
+        .unwrap();
+    let resp = helpers::get_auth(&app, &format!("/api/folders/resolve?bucket_id={}&path=/resolve-me", bucket.id), &token).await;
     assert_eq!(resp.status(), 200);
     let json = helpers::response_json(resp).await;
     assert!(json.get("folder_id").is_some());
@@ -796,9 +800,9 @@ async fn test_get_file_metadata_success() {
     setup_bucket_access(&state, user_id, "default").await;
     let token = helpers::login_user(&app, &email, &password).await;
 
-    let (_ufid, fid) = upload_file(&app, &token, b"meta test", "meta.txt", "default").await;
+    let (ufid, _fid) = upload_file(&app, &token, b"meta test", "meta.txt", "default").await;
 
-    let resp = helpers::get_auth(&app, &format!("/api/files/{fid}"), &token).await;
+    let resp = helpers::get_auth(&app, &format!("/api/files/{ufid}"), &token).await;
     assert_eq!(resp.status(), 200);
     let json = helpers::response_json(resp).await;
     assert_eq!(json["name"], "meta.txt");
@@ -896,7 +900,7 @@ async fn test_delete_file_appears_in_trash() {
 
     let (ufid, _) = upload_file(&app, &token, b"trash me", "trashed.txt", "default").await;
 
-    let resp = helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &token).await;
+    let resp = helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &serde_json::json!({}), &token).await;
     assert_eq!(resp.status(), 200);
 
     let resp = helpers::get_auth(&app, "/api/files?bucket=default", &token).await;
@@ -921,7 +925,7 @@ async fn test_restore_file_from_trash() {
 
     let (ufid, _) = upload_file(&app, &token, b"restorable", "restore.txt", "default").await;
 
-    helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &token).await;
+    helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &serde_json::json!({}), &token).await;
 
     let resp = helpers::json_post_auth(
         &app,
@@ -953,7 +957,7 @@ async fn test_restore_file_to_folder() {
     let folder_id = create_folder(&app, &token, "docs", "default").await;
     let (ufid, _) = upload_file(&app, &token, b"movable", "movable.txt", "default").await;
 
-    helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &token).await;
+    helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &serde_json::json!({}), &token).await;
 
     let resp = helpers::json_post_auth(
         &app,
@@ -964,7 +968,7 @@ async fn test_restore_file_to_folder() {
     .await;
     assert_eq!(resp.status(), 200);
 
-    let resp = helpers::get_auth(&app, &format!("/api/folders/{folder_id}/files"), &token).await;
+    let resp = helpers::get_auth(&app, &format!("/api/files?bucket=default&folder_id={folder_id}"), &token).await;
     assert_eq!(resp.status(), 200);
     let json = helpers::response_json(resp).await;
     assert_eq!(json["files"].as_array().unwrap().len(), 1);
@@ -981,9 +985,9 @@ async fn test_permanent_delete_file_from_trash() {
 
     let (ufid, _) = upload_file(&app, &token, b"gone forever", "perm.txt", "default").await;
 
-    helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &token).await;
+    helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &serde_json::json!({}), &token).await;
 
-    let resp = helpers::delete_auth(&app, &format!("/api/trash/file/{ufid}"), &token).await;
+    let resp = helpers::delete_auth(&app, &format!("/api/trash/file/{ufid}"), &serde_json::json!({}), &token).await;
     assert_eq!(resp.status(), 200);
 
     let resp = helpers::get_auth(&app, "/api/trash", &token).await;
@@ -1025,7 +1029,7 @@ async fn test_permanent_delete_nonexistent_from_trash() {
     let token = helpers::login_user(&app, &email, &password).await;
 
     let fake_id = Uuid::new_v4();
-    let resp = helpers::delete_auth(&app, &format!("/api/trash/file/{fake_id}"), &token).await;
+    let resp = helpers::delete_auth(&app, &format!("/api/trash/file/{fake_id}"), &serde_json::json!({}), &token).await;
     assert_eq!(resp.status(), 404);
 }
 
@@ -1043,7 +1047,7 @@ async fn test_trash_isolation_between_users() {
     let token2 = helpers::login_user(&app, &email2, &pass2).await;
 
     let (ufid, _) = upload_file(&app, &token1, b"user1 file", "user1.txt", "default").await;
-    helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &token1).await;
+    helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &serde_json::json!({}), &token1).await;
 
     let resp = helpers::get_auth(&app, "/api/trash", &token1).await;
     let json = helpers::response_json(resp).await;
@@ -1097,7 +1101,7 @@ async fn test_restore_does_not_duplicate_file() {
 
     let (ufid, _) = upload_file(&app, &token, b"unique", "nodup.txt", "default").await;
 
-    helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &token).await;
+    helpers::delete_auth(&app, &format!("/api/files/{ufid}"), &serde_json::json!({}), &token).await;
     helpers::json_post_auth(
         &app,
         &format!("/api/trash/file/{ufid}/restore"),
@@ -1129,7 +1133,7 @@ async fn test_delete_folder_appears_in_trash_with_files() {
     upload_file_in_folder(&app, &token, b"pic1", "pic1.jpg", "default", &folder_id).await;
     upload_file_in_folder(&app, &token, b"pic2", "pic2.jpg", "default", &folder_id).await;
 
-    let resp = helpers::delete_auth(&app, &format!("/api/folders/{folder_id}"), &token).await;
+    let resp = helpers::delete_auth(&app, &format!("/api/folders/{folder_id}"), &serde_json::json!({}), &token).await;
     assert_eq!(resp.status(), 200);
 
     // Folder and files should be in trash
@@ -1157,7 +1161,7 @@ async fn test_restore_folder_from_trash() {
     let folder_id = create_folder(&app, &token, "work", "default").await;
     upload_file_in_folder(&app, &token, b"doc1", "doc1.txt", "default", &folder_id).await;
 
-    helpers::delete_auth(&app, &format!("/api/folders/{folder_id}"), &token).await;
+    helpers::delete_auth(&app, &format!("/api/folders/{folder_id}"), &serde_json::json!({}), &token).await;
 
     // Restore folder
     let resp = helpers::json_post_auth(
@@ -1176,7 +1180,7 @@ async fn test_restore_folder_from_trash() {
     assert_eq!(json["folders"].as_array().unwrap()[0]["name"], "work");
 
     // Files are back in the folder
-    let resp = helpers::get_auth(&app, &format!("/api/folders/{folder_id}/files"), &token).await;
+    let resp = helpers::get_auth(&app, &format!("/api/files?bucket=default&folder_id={folder_id}"), &token).await;
     let json = helpers::response_json(resp).await;
     assert_eq!(json["files"].as_array().unwrap().len(), 1);
 
@@ -1199,7 +1203,7 @@ async fn test_delete_nested_folder_preserves_hierarchy_in_trash() {
     let child_id = create_folder_in(&app, &token, "keystone", "default", &parent_id).await;
     upload_file_in_folder(&app, &token, b"code", "main.rs", "default", &child_id).await;
 
-    helpers::delete_auth(&app, &format!("/api/folders/{parent_id}"), &token).await;
+    helpers::delete_auth(&app, &format!("/api/folders/{parent_id}"), &serde_json::json!({}), &token).await;
 
     let resp = helpers::get_auth(&app, "/api/trash", &token).await;
     let json = helpers::response_json(resp).await;
@@ -1221,9 +1225,9 @@ async fn test_permanent_delete_folder_from_trash() {
     let folder_id = create_folder(&app, &token, "temp", "default").await;
     upload_file_in_folder(&app, &token, b"data", "data.bin", "default", &folder_id).await;
 
-    helpers::delete_auth(&app, &format!("/api/folders/{folder_id}"), &token).await;
+    helpers::delete_auth(&app, &format!("/api/folders/{folder_id}"), &serde_json::json!({}), &token).await;
 
-    let resp = helpers::delete_auth(&app, &format!("/api/trash/folder/{folder_id}"), &token).await;
+    let resp = helpers::delete_auth(&app, &format!("/api/trash/folder/{folder_id}"), &serde_json::json!({}), &token).await;
     assert_eq!(resp.status(), 200);
 
     let resp = helpers::get_auth(&app, "/api/trash", &token).await;

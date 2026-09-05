@@ -142,7 +142,7 @@ pub async fn reset_db(db: &Database) {
         "TRUNCATE TABLE \
             files, users, api_keys, storage_objects, audit_logs, \
             admin_settings, buckets, user_groups, group_members, group_buckets, \
-            storage_paths, user_folders, user_files \
+            storage_paths, user_folders, user_files, refresh_tokens \
          CASCADE",
     )
     .execute(db.pool())
@@ -168,7 +168,7 @@ pub async fn build_test_state() -> (Arc<AppState>, tempfile::TempDir) {
     let temp_dir = setup_test_storage();
 
     let jwt_service = JwtService::new("test-secret-key-for-api-tests", 60);
-    let session_service = SessionService::new(720);
+    let session_service = SessionService::new(db.pool().clone(), 720);
 
     let mut storage = StorageRegistry::new();
     let backend = LocalFsBackend::new(temp_dir.path()).expect("Failed to create backend");

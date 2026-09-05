@@ -1,12 +1,9 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use chrono::{DateTime, Utc};
 use crate::error::{AppError, AppResult};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use tokio::sync::RwLock;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Refresh tokens are 64 hex chars (32 random bytes). Anything far larger is
@@ -28,21 +25,33 @@ pub struct RefreshToken {
     pub revoked: bool,
 }
 
-struct SessionStore {
-    tokens: HashMap<String, RefreshToken>,
+/// Flat DB row for `refresh_tokens`. UUIDs are TEXT columns (matching the rest
+/// of the schema); timestamps are `TIMESTAMPTZ` so expiry comparisons are exact.
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct RefreshTokenRow {
+    id: String,
+    user_id: String,
+    token_hash: String,
+    expires_at: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+    revoked: bool,
 }
 
+/// Refresh-token store backed by Postgres.
+///
+/// Unlike the previous in-memory `HashMap`, tokens survive restarts and are
+/// shared across instances, and rotation/revocation is atomic at the database
+/// level. Only SHA-256 hashes of tokens are ever stored; the raw token is
+/// returned to the client exactly once.
 pub struct SessionService {
-    store: Arc<RwLock<SessionStore>>,
+    pool: PgPool,
     expiry_minutes: u64,
 }
 
 impl SessionService {
-    pub fn new(expiry_minutes: u64) -> Self {
+    pub fn new(pool: PgPool, expiry_minutes: u64) -> Self {
         Self {
-            store: Arc::new(RwLock::new(SessionStore {
-                tokens: HashMap::new(),
-            })),
+            pool,
             expiry_minutes,
         }
     }
@@ -51,14 +60,6 @@ impl SessionService {
     /// browser and the store agree on when the session ends).
     pub fn expiry_seconds(&self) -> u64 {
         self.expiry_minutes * 60
-    }
-
-    /// Drop expired entries so the in-memory store cannot grow without bound
-    /// (an attacker can otherwise mint one refresh token per login forever).
-    /// Must be called while holding the write lock.
-    fn prune_expired(store: &mut SessionStore) {
-        let now = Utc::now();
-        store.tokens.retain(|_, t| t.expires_at > now);
     }
 
     fn generate_raw_token() -> String {
@@ -72,6 +73,24 @@ impl SessionService {
         hasher.update(token.as_bytes());
         hex::encode(hasher.finalize())
     }
+
+    fn row_to_token(row: RefreshTokenRow) -> AppResult<RefreshToken> {
+        Ok(RefreshToken {
+            id: Uuid::parse_str(&row.id).map_err(|_| {
+                AppError::Internal("invalid refresh token id in database".into())
+            })?,
+            user_id: Uuid::parse_str(&row.user_id).map_err(|_| {
+                AppError::Internal("invalid refresh token user id in database".into())
+            })?,
+            token_hash: row.token_hash,
+            expires_at: row.expires_at,
+            created_at: row.created_at,
+            revoked: row.revoked,
+        })
+    }
+
+    const COLUMNS: &'static str =
+        "id, user_id, token_hash, expires_at, created_at, revoked";
 
     pub async fn create_refresh_token(
         &self,
@@ -90,9 +109,30 @@ impl SessionService {
             revoked: false,
         };
 
-        let mut store = self.store.write().await;
-        Self::prune_expired(&mut store);
-        store.tokens.insert(token_hash, refresh_token.clone());
+        // Drop the user's expired rows so the table cannot grow without bound
+        // (the previous in-memory store pruned on every insert too). Best-effort:
+        // a failing prune must not break login.
+        let _ = sqlx::query(
+            "DELETE FROM refresh_tokens WHERE user_id = $1 AND expires_at <= NOW() AND revoked = false",
+        )
+        .bind(user_id.to_string())
+        .execute(&self.pool)
+        .await;
+
+        let sql = format!(
+            "INSERT INTO refresh_tokens ({}) VALUES ($1, $2, $3, $4, $5, $6)",
+            Self::COLUMNS
+        );
+        sqlx::query(&sql)
+            .bind(refresh_token.id.to_string())
+            .bind(user_id.to_string())
+            .bind(&token_hash)
+            .bind(refresh_token.expires_at)
+            .bind(refresh_token.created_at)
+            .bind(false)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to store refresh token: {e}")))?;
 
         Ok((raw_token, refresh_token))
     }
@@ -102,12 +142,21 @@ impl SessionService {
             return Err(AppError::Unauthorized("invalid refresh token".into()));
         }
         let token_hash = Self::hash_token(token);
-        let store = self.store.read().await;
 
-        let refresh_token = store
-            .tokens
-            .get(&token_hash)
-            .ok_or_else(|| AppError::Unauthorized("invalid refresh token".into()))?;
+        let sql = format!(
+            "SELECT {} FROM refresh_tokens WHERE token_hash = $1",
+            Self::COLUMNS
+        );
+        let row = sqlx::query_as::<_, RefreshTokenRow>(&sql)
+            .bind(&token_hash)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to query refresh token: {e}")))?;
+
+        let refresh_token = match row {
+            Some(r) => Self::row_to_token(r)?,
+            None => return Err(AppError::Unauthorized("invalid refresh token".into())),
+        };
 
         if refresh_token.revoked {
             return Err(AppError::Unauthorized(
@@ -121,38 +170,39 @@ impl SessionService {
             ));
         }
 
-        Ok(refresh_token.clone())
+        Ok(refresh_token)
     }
 
     pub async fn revoke_token(&self, token_id: Uuid) -> AppResult<()> {
-        let mut store = self.store.write().await;
+        let affected = sqlx::query("UPDATE refresh_tokens SET revoked = true WHERE id = $1")
+            .bind(token_id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to revoke refresh token: {e}")))?
+            .rows_affected();
 
-        let token = store.tokens.values_mut().find(|t| t.id == token_id);
-
-        match token {
-            Some(t) => {
-                t.revoked = true;
-                Ok(())
-            }
-            None => Err(AppError::NotFound("refresh token not found".into())),
+        if affected == 0 {
+            return Err(AppError::NotFound("refresh token not found".into()));
         }
+        Ok(())
     }
 
     /// Revoke every live refresh token belonging to a user. Used after a
     /// password change so a stolen refresh token does not survive it.
     pub async fn revoke_all_for_user(&self, user_id: Uuid) {
-        let mut store = self.store.write().await;
-        for t in store.tokens.values_mut() {
-            if t.user_id == user_id {
-                t.revoked = true;
-            }
-        }
+        let _ = sqlx::query(
+            "UPDATE refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false",
+        )
+        .bind(user_id.to_string())
+        .execute(&self.pool)
+        .await;
     }
 
-    /// Atomically revoke the presented token and issue a replacement under a
-    /// single write lock. A stolen token used concurrently by two clients can
-    /// therefore only succeed once: the second rotation sees `revoked` and is
-    /// rejected instead of silently minting another token.
+    /// Atomically revoke the presented token and issue a replacement inside a
+    /// single transaction. The old row is locked with `FOR UPDATE`, so a stolen
+    /// token used concurrently by two clients can only succeed once: the second
+    /// rotation blocks until the first commits, then sees `revoked = true` and
+    /// is rejected instead of silently minting another token.
     pub async fn rotate_token(
         &self,
         old_token: &str,
@@ -162,12 +212,28 @@ impl SessionService {
         }
 
         let token_hash = Self::hash_token(old_token);
-        let mut store = self.store.write().await;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to begin transaction: {e}")))?;
 
-        let old = store
-            .tokens
-            .get(&token_hash)
-            .ok_or_else(|| AppError::Unauthorized("invalid refresh token".into()))?;
+        let sql = format!(
+            "SELECT {} FROM refresh_tokens WHERE token_hash = $1 FOR UPDATE",
+            Self::COLUMNS
+        );
+        let row = sqlx::query_as::<_, RefreshTokenRow>(&sql)
+            .bind(&token_hash)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to query refresh token: {e}")))?;
+
+        let old = match row {
+            Some(r) => Self::row_to_token(r)?,
+            None => {
+                return Err(AppError::Unauthorized("invalid refresh token".into()));
+            }
+        };
 
         if old.revoked {
             return Err(AppError::Unauthorized(
@@ -181,10 +247,11 @@ impl SessionService {
             ));
         }
 
-        let user_id = old.user_id;
-        if let Some(t) = store.tokens.get_mut(&token_hash) {
-            t.revoked = true;
-        }
+        sqlx::query("UPDATE refresh_tokens SET revoked = true WHERE id = $1")
+            .bind(old.id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to revoke refresh token: {e}")))?;
 
         let raw_token = Self::generate_raw_token();
         let new_hash = Self::hash_token(&raw_token);
@@ -192,79 +259,32 @@ impl SessionService {
 
         let refresh_token = RefreshToken {
             id: Uuid::new_v4(),
-            user_id,
+            user_id: old.user_id,
             token_hash: new_hash.clone(),
             expires_at: now + chrono::Duration::minutes(self.expiry_minutes as i64),
             created_at: now,
             revoked: false,
         };
 
-        Self::prune_expired(&mut store);
-        store.tokens.insert(new_hash, refresh_token.clone());
+        let sql = format!(
+            "INSERT INTO refresh_tokens ({}) VALUES ($1, $2, $3, $4, $5, $6)",
+            Self::COLUMNS
+        );
+        sqlx::query(&sql)
+            .bind(refresh_token.id.to_string())
+            .bind(refresh_token.user_id.to_string())
+            .bind(&new_hash)
+            .bind(refresh_token.expires_at)
+            .bind(refresh_token.created_at)
+            .bind(false)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to store rotated refresh token: {e}")))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Internal(format!("failed to commit token rotation: {e}")))?;
 
         Ok((raw_token, refresh_token))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_create_and_validate_refresh_token() {
-        let service = SessionService::new(60);
-        let user_id = Uuid::new_v4();
-
-        let (raw_token, stored) = service.create_refresh_token(user_id).await.unwrap();
-        assert_eq!(stored.user_id, user_id);
-        assert!(!stored.revoked);
-
-        let validated = service.validate_refresh_token(&raw_token).await.unwrap();
-        assert_eq!(validated.id, stored.id);
-    }
-
-    #[tokio::test]
-    async fn test_validate_invalid_token() {
-        let service = SessionService::new(60);
-        assert!(service
-            .validate_refresh_token("nonexistent_token")
-            .await
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn test_revoke_token() {
-        let service = SessionService::new(60);
-        let user_id = Uuid::new_v4();
-
-        let (_, stored) = service.create_refresh_token(user_id).await.unwrap();
-        service.revoke_token(stored.id).await.unwrap();
-
-        let store = service.store.read().await;
-        let token = store.tokens.get(&stored.token_hash).unwrap();
-        assert!(token.revoked);
-    }
-
-    #[tokio::test]
-    async fn test_rotate_token() {
-        let service = SessionService::new(60);
-        let user_id = Uuid::new_v4();
-
-        let (old_raw, old_stored) = service.create_refresh_token(user_id).await.unwrap();
-        let (new_raw, new_stored) = service.rotate_token(&old_raw).await.unwrap();
-
-        assert_ne!(old_stored.id, new_stored.id);
-        assert_eq!(new_stored.user_id, user_id);
-
-        // Old token should be revoked
-        let store = service.store.read().await;
-        assert!(store.tokens[&old_stored.token_hash].revoked);
-
-        // New token should be valid
-        drop(store);
-        assert!(service.validate_refresh_token(&new_raw).await.is_ok());
-
-        // Old token should be invalid
-        assert!(service.validate_refresh_token(&old_raw).await.is_err());
     }
 }

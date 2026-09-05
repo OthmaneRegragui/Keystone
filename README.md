@@ -12,7 +12,7 @@
 - **Multi-bucket storage** with group-based access control (RBAC)
 - **Virtual folder system** for organizing files within buckets
 - **Drag-and-drop uploads** with real-time progress tracking
-- **Secure authentication** with JWT + Argon2 password hashing + refresh token rotation
+- **Secure authentication** with JWT + Argon2 password hashing + DB-backed refresh sessions (httpOnly cookie, one-time rotation, revocation)
 - **Scoped API keys** for programmatic access (users manage their own from Account → API Keys; admins can create for any user or bot)
 - **Bot accounts** with scoped API keys for automated file operations (admins manage all; eligible users manage their own)
 - **Sharing** — share files and folders with other users by email (recipients can view/download but not reshare; gated by a global toggle and a per-group flag)
@@ -98,6 +98,7 @@ The connection URL is derived from `POSTGRES_*` (percent-encoded automatically, 
 |----------|-------------|---------|
 | `KEYSTONE__AUTH__JWT_SECRET` | HMAC signing secret | `change-me-in-production` |
 | `KEYSTONE__AUTH__JWT_EXPIRATION_SECS` | Access token lifetime (seconds) | `43200` (12 hours) |
+| `REFRESH_EXPIRY_DAYS` | Refresh session lifetime (days) — controls the server-side `refresh_tokens` record and the `keystone_refresh` httpOnly cookie | `30` |
 
 ### Storage
 
@@ -175,7 +176,7 @@ then it holds the only copy of your files.
 | Backend         | Axum 0.7 + Tokio                    |
 | Frontend        | Alpine.js + Tailwind CSS            |
 | Database        | PostgreSQL (via SQLx)                  |
-| Authentication  | JWT (HS256) + Argon2 + Refresh tokens |
+| Authentication  | JWT (HS256) + Argon2 + DB-backed refresh sessions (httpOnly cookie) |
 | Content Hashing | BLAKE3                              |
 | ORM             | SQLx (compile-time checked SQL)     |
 
@@ -246,8 +247,8 @@ keystone/
 │       ├── register.html    # Registration page
 │       ├── logo.svg         # Brand logo (favicon + in-app)
 │       └── vendor/          # Self-hosted Alpine.js + Tailwind (offline)
-├── migrations/              # SQL migrations (0001-0022)
-├── tests/                   # 323 integration tests
+├── migrations/              # SQL migrations (0001-0023)
+├── tests/                   # 438 tests (107 unit + 331 integration)
 └── docker/                  # Docker configuration
 ```
 
@@ -308,7 +309,9 @@ Runtime-configurable settings stored in the `admin_settings` table:
 **Base URL:** `http://localhost:3000` — **Content-Type:** `application/json` (unless noted)
 **Authentication:** `Authorization: Bearer <token>` header (JWT access token).
 
-All endpoints except `/auth/register`, `/auth/login`, `/auth/refresh`, `/api/health/*`, and `/api/public/settings` require a bearer token. Admin endpoints require the `admin` role. The same reference is available in-app at `/docs` (admin only).
+All endpoints except `/auth/register`, `/auth/login`, `/auth/refresh`, `/api/health/*`, and `/api/public/settings` require a bearer token. Admin endpoints require the `admin` role. The same reference is available in-app at `/docs` (admin only — server-side enforced).
+
+Refresh tokens are stored **server-side**: only a SHA-256 hash lives in the `refresh_tokens` table, sessions survive server restarts, and every use is atomic (single-use rotation, see below). The UI also receives the refresh token as an httpOnly `keystone_refresh` cookie, so nothing token-related ever touches JS-accessible storage.
 
 ### Authentication
 
@@ -337,16 +340,16 @@ Public endpoint. First user automatically becomes admin.
 **Response (200):** Same `AuthResponse`. **Errors:** `401` invalid credentials.
 
 #### POST `/auth/refresh` — Refresh Token
-Rotates the refresh token — the old one is invalidated.
+Single-use rotation of the refresh token — the old one is revoked and a new one issued, atomically. The credential is sent in the httpOnly `keystone_refresh` cookie (browser sessions); API clients may put it in the body (`refresh_token`) for backward compatibility.
+
+Accepted as **either** the cookie or the JSON body:
 ```json
-{ "refresh_token": "string" }
+{ "refresh_token": "string" }        // optional — cookie preferred
 ```
-**Response (200):** New `AuthResponse`. **Errors:** `401` invalid/expired/revoked.
+**Response (200):** New `AuthResponse` plus a rotated `Set-Cookie: keystone_refresh=...`. **Errors:** `401` invalid/expired/revoked. **Security:** the token data is never stored in the clear — the table keeps only a SHA-256 hash of each token, and a concurrent reuse of an already-rotated token yields no new one (only one rotation ever succeeds).
 
 #### POST `/auth/logout` — Logout
-```json
-{ "refresh_token": "string" }
-```
+Revokes the server-side session. Accepts the httpOnly `keystone_refresh` cookie (browser) or an optional JSON body `{ "refresh_token": "string" }`; clears the cookie. A bogus token is rejected with `401` (never silently "succeeds").
 **Response (200):** `{ "message": "logged out successfully" }`
 
 #### POST `/auth/forgot-password` — Forgot Password
@@ -491,7 +494,7 @@ Deleting a file or folder soft-deletes it (the bytes stay on disk and the physic
 
 ### Sharing
 
-Users can share files and folders with other registered users by email. Sharing requires the global `allow_user_sharing` setting (`true` by default) plus a group membership with the `allow_sharing` flag (admins bypass both). Sharing a folder shares its **entire subtree** — descendant folders and files are all granted. Recipients can browse and download shared items but **cannot reshare** them. Bots are rejected on all of these endpoints.
+Users can share files and folders with other registered users by email. Sharing requires the global `allow_user_sharing` setting (`true` by default) plus a group membership with the `allow_sharing` flag (admins bypass both). Each request accepts **at most 100 recipient emails** (excess is rejected with `400`, not silently dropped). Sharing a folder shares its **entire subtree** — descendant folders and files are all granted. Recipients can browse and download shared items but **cannot reshare** them. Bots are rejected on all of these endpoints.
 
 Notable behaviors: shares are per (sharer, recipient, item) — re-sharing to the same person is idempotent; deleting a file/folder automatically removes all of its shares; recipients that don't exist (or the sharer's own email) are reported in `failed_emails`.
 
@@ -623,7 +626,7 @@ Back up or restore a bucket. `export-index` produces a JSON manifest of users/fi
 | GET | `/api/admin/users` | List up to 200 users with group memberships |
 | GET | `/api/admin/users/single?id=<uuid>` | Single user |
 | POST | `/api/admin/users` | Create: `{ "username", "email", "password", "role", "group_ids" }` |
-| PUT | `/api/admin/users/update` | Update: `{ "id", "email"?, "role"?, "password"?, "group_ids"? }` — `group_ids` replaces all memberships |
+| PUT | `/api/admin/users/update` | Update: `{ "id", "email"?, "role"?, "password"?, "group_ids"? }` — `group_ids` replaces all memberships. **Safety guards:** an admin cannot demote their own account, and the platform's **last admin can never be demoted** — the check is done in a single atomic `UPDATE`, so even two admins demoting each other concurrently can never leave the platform without an admin. Errors: `400` self-demotion or "cannot demote the last admin", `404` unknown user |
 | PUT | `/api/admin/users/quota` | `{ "user_id", "storage_quota" }` (bytes; `0` = unlimited) |
 
 #### Groups
@@ -715,8 +718,8 @@ The Files UI keeps the current location in the URL, so pages can be bookmarked a
 | `/account` | Account | Profile, security settings, and per-user API key management |
 | `/admin` | Admin Panel | Users, groups, buckets, settings (admin only) |
 | `/bots` | Bots | Bot management — admins see all, eligible users manage their own (scoped API-key accounts) |
-| `/orphans` | Orphaned Files | Admin-only orphaned file reclamation |
-| `/docs` | Documentation | Admin-only ops + API reference (mirrors this README) |
+| `/orphans` | Orphaned Files | Admin-only orphaned file reclamation — server-side enforced (`401` anonymous, `403` non-admin) |
+| `/docs` | Documentation | Admin-only ops + API reference — server-side enforced (`401` anonymous, `403` non-admin) |
 | `/login` | Login | User authentication |
 | `/register` | Register | New user registration |
 | `/setup` | Setup | First-time admin user creation |
@@ -761,7 +764,7 @@ docker compose --env-file .env -f docker/docker-compose.yml up --build
 
 ### Reset the Database
 
-To delete ALL data in the PostgreSQL database and start from scratch (all 22
+To delete ALL data in the PostgreSQL database and start from scratch (all 23
 migrations are re-run on the next start, so the schema is rebuilt exactly as on a
 fresh install):
 
@@ -778,7 +781,7 @@ volumes.
 
 ## Database
 
-PostgreSQL, automatic migrations on startup. Schema managed via 22 numbered migrations:
+PostgreSQL, automatic migrations on startup. Schema managed via 23 numbered migrations:
 
 - **Development** (default): derived from `POSTGRES_*` (or `postgres://keystone:keystone@localhost:5432/keystone`) — also set by `run.sh`
 - **Tests**: need a running Postgres. Each test binary creates its own database on demand, named after the binary (`keystone_test_<binary>`). Override the server with `TEST_DATABASE_BASE_URL` (default: `postgres://keystone:keystone@localhost:5432/postgres`), or set `TEST_DATABASE_URL` to use one pre-provisioned database verbatim.
@@ -807,6 +810,7 @@ PostgreSQL, automatic migrations on startup. Schema managed via 22 numbered migr
 20. Soft-deleted folders
 21. User files purged at (trash purge tracking)
 22. Sharing (shared_items table, `allow_sharing` group flag, `allow_user_sharing` setting)
+23. DB-backed refresh sessions (`refresh_tokens` table — hashed tokens, single-use rotation, revocation, server-restart persistence)
 
 ## License
 

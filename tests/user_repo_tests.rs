@@ -331,6 +331,70 @@ async fn test_update_user_role() {
 }
 
 #[tokio::test]
+async fn test_update_user_demote_last_admin_rejected() {
+    let db = helpers::setup_reset_db().await;
+    let data = create_test_user(&db).await;
+    let user = UserRepository::find_by_username(db.pool(), &data.username)
+        .await
+        .unwrap()
+        .expect("user should exist");
+
+    // Promote the only user to admin so the database holds exactly one admin.
+    UserRepository::update_user(db.pool(), user.id, None, Some("admin"), None)
+        .await
+        .unwrap();
+
+    let result = UserRepository::update_user(db.pool(), user.id, None, Some("user"), None).await;
+    assert!(
+        matches!(result, Err(AppError::BadRequest(_))),
+        "demoting the last admin must be rejected, got {result:?}"
+    );
+
+    let user = UserRepository::find_by_id(db.pool(), user.id)
+        .await
+        .unwrap()
+        .expect("user should still exist");
+    assert_eq!(user.role, UserRole::Admin);
+    assert_eq!(user.email, data.email);
+}
+
+#[tokio::test]
+async fn test_update_user_demote_allowed_with_second_admin() {
+    let db = helpers::setup_reset_db().await;
+    let data = create_test_user(&db).await;
+    let user = UserRepository::find_by_username(db.pool(), &data.username)
+        .await
+        .unwrap()
+        .expect("user should exist");
+    UserRepository::update_user(db.pool(), user.id, None, Some("admin"), None)
+        .await
+        .unwrap();
+    let data2 = create_test_user(&db).await;
+    let user2 = UserRepository::find_by_username(db.pool(), &data2.username)
+        .await
+        .unwrap()
+        .expect("second user should exist");
+    UserRepository::update_user(db.pool(), user2.id, None, Some("admin"), None)
+        .await
+        .unwrap();
+
+    UserRepository::update_user(db.pool(), user.id, None, Some("user"), None)
+        .await
+        .unwrap();
+
+    let demoted = UserRepository::find_by_id(db.pool(), user.id)
+        .await
+        .unwrap()
+        .expect("user should still exist");
+    assert_eq!(demoted.role, UserRole::User);
+    let remaining = UserRepository::find_by_id(db.pool(), user2.id)
+        .await
+        .unwrap()
+        .expect("second admin should still exist");
+    assert_eq!(remaining.role, UserRole::Admin);
+}
+
+#[tokio::test]
 async fn test_update_user_password_hash() {
     let db = helpers::setup_reset_db().await;
     let data = create_test_user(&db).await;

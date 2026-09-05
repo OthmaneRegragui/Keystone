@@ -151,9 +151,9 @@ async fn test_admin_delete_bot() {
     let resp = tower::ServiceExt::oneshot(app.clone(), request).await.unwrap();
     assert_eq!(resp.status(), 200);
 
-    // Bot key no longer works
+    // Bot key no longer works (deleted key resolves to invalid credentials)
     let resp = helpers::get_auth(&app, "/api/bot/buckets", &bot_key).await;
-    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.status(), 401);
 }
 
 #[tokio::test]
@@ -207,7 +207,10 @@ async fn test_admin_create_bot_with_path_rules() {
 #[tokio::test]
 async fn test_admin_bot_requires_admin_or_permission() {
     let (app, token, _state, _temp) = setup_user().await;
+    // Body must pass DTO validation first so the authorization check is what
+    // rejects the request (invalid bodies surface as 422 before authz).
     let body = serde_json::json!({
+        "user_id": "00000000-0000-0000-0000-000000000000",
         "name": "nope-bot",
     });
     let resp = helpers::json_post_auth(&app, "/api/admin/bots", &body, &token).await;

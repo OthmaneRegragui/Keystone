@@ -123,7 +123,7 @@
                 <section id="overview" class="doc-anchor mb-10">
                     <h3 class="text-lg font-bold text-gray-900 mb-3">Overview</h3>
                     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-4 text-sm text-gray-600 leading-relaxed">
-                        <p>Keystone is a self-hosted, content-addressable file platform. Every file is stored under its SHA-256 hash, so duplicate uploads are automatically de-duplicated (the same bytes occupy one storage slot, referenced by many user files). It is API-first: every UI action calls a JSON HTTP API.</p>
+                        <p>Keystone is a self-hosted, content-addressable file platform. Every file is stored under its BLAKE3 hash, so duplicate uploads are automatically de-duplicated (the same bytes occupy one storage slot, referenced by many user files). It is API-first: every UI action calls a JSON HTTP API.</p>
                         <p class="font-medium text-gray-900">Core concepts</p>
                         <ul class="list-disc pl-5 space-y-1">
                             <li><span class="font-medium text-gray-900">Storage paths</span> — physical directories (disks/mounts) configured via <code>STORAGE_LOCAL_PATHS</code>. The first is the default for new uploads.</li>
@@ -256,6 +256,7 @@ docker exec keystone-postgres psql -U keystone -d keystone -c "SELECT version();
                         <p>All endpoints (except <code>/auth/*</code> register/login/refresh and <code>/api/health/*</code>) require a bearer token:</p>
 <pre><code>Authorization: Bearer &lt;access_token&gt;</code></pre>
                         <p>Admin endpoints require an admin role. Full request/response examples live in the repository README ("API Reference" section).</p>
+                        <p class="mt-2 text-gray-500">Refresh tokens are stored <strong>server-side only</strong> (SHA-256 hashes in the <code>refresh_tokens</code> table). Rotation is atomic — only one refresh ever succeeds, and a stolen token is rejected if it has already been used. Browser sessions receive the refresh token as an httpOnly <code>Set-Cookie: keystone_refresh=...</code> cookie, so it never touches JS-accessible storage. Admin-only pages (<code>/docs</code>, <code>/orphans</code>) are also protected server-side by the same session: anonymous browsers receive <code>401</code>, non-admin logged-in users receive <code>403</code>.</p>
 
                         <div class="overflow-x-auto">
                             <table class="min-w-full text-left text-sm">
@@ -269,8 +270,8 @@ docker exec keystone-postgres psql -U keystone -d keystone -c "SELECT version();
                                 <tbody class="divide-y divide-gray-100">
                                     <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/register</td><td class="py-2">Create account (disabled when registration is blocked)</td></tr>
                                     <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/login</td><td class="py-2">Exchange credentials for access + refresh tokens</td></tr>
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/refresh</td><td class="py-2">Rotate tokens with a refresh token</td></tr>
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/logout</td><td class="py-2">Revoke the session</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/refresh</td><td class="py-2">Rotate the DB-backed session (single-use — old token revoked; httpOnly cookie set). Optional body: <code>{ "refresh_token" }</code>; the cookie is used by default.</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/logout</td><td class="py-2">Revoke the server-side session and clear the httpOnly cookie. Optional body: <code>{ "refresh_token" }</code>; cookie is preferred.</td></tr>
                                     <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/forgot-password</td><td class="py-2">Request a password reset token</td></tr>
                                     <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/reset-password</td><td class="py-2">Complete password reset with the emailed token</td></tr>
                                     <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/change-password</td><td class="py-2">Change password (authenticated)</td></tr>

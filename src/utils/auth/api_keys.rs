@@ -1,10 +1,15 @@
+use rand::rngs::OsRng;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 
 const BASE62: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 pub fn generate_api_key() -> (String, String, String) {
-    let mut rng = rand::thread_rng();
+    // OsRng is a CSPRNG backed by the OS entropy source. API keys guard file
+    // access, so they must not be guessable: a seeded PRNG (e.g. thread_rng)
+    // would let an attacker who observes output recover the state and forge
+    // keys.
+    let mut rng = OsRng;
     let suffix: String = (0..40)
         .map(|_| BASE62[rng.gen_range(0..BASE62.len())] as char)
         .collect();

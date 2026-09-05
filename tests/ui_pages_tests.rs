@@ -7,8 +7,11 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::Router;
 use http_body_util::BodyExt;
 use keystone::db::repos::{AdminSettingRepository, UserRepository};
+use keystone::error::AppResult;
 use keystone::models::UserRole;
+use keystone::utils::auth::session::REFRESH_COOKIE_NAME;
 use keystone::AppState;
+use uuid::Uuid;
 
 // ── Embedded HTML (mirrors main.rs include_str! constants) ──────────────────
 
@@ -37,27 +40,75 @@ impl IntoResponse for HtmlResponse {
     }
 }
 
-/// Serve an admin-only page. Checks the Authorization header for admin role.
-/// Mirrors main.rs admin_page().
+/// Serve an admin-only page. The caller must prove an admin identity either
+/// through the Bearer JWT (Authorization header) or the httpOnly refresh
+/// session cookie — both are resolved to a user id and the role is re-checked
+/// against the live database row before any HTML is served. Anonymous callers
+/// get 401 and authenticated non-admins get 403. Mirrors main.rs admin_page().
 async fn admin_page(headers: HeaderMap, state: &Arc<AppState>, html: &str) -> Response {
-    if let Some(auth) = headers
+    match admin_identity(&headers, state).await {
+        Ok(AdminGate::Admin) => HtmlResponse(versioned(html)).into_response(),
+        Ok(AdminGate::Forbidden) => (StatusCode::FORBIDDEN, "Forbidden").into_response(),
+        Ok(AdminGate::Unauthenticated) => {
+            (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response(),
+    }
+}
+
+enum AdminGate {
+    Admin,
+    Forbidden,
+    Unauthenticated,
+}
+
+/// Resolve a request to an admin identity: validate the credential (JWT or
+/// refresh cookie), then read the role from the `users` table rather than
+/// from the token. Mirrors main.rs admin_identity().
+async fn admin_identity(headers: &HeaderMap, state: &Arc<AppState>) -> AppResult<AdminGate> {
+    let user_id: Uuid = if let Some(auth) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
     {
         let (scheme, token) = auth.split_once(' ').unwrap_or(("", auth));
         if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() {
-            return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+            return Ok(AdminGate::Unauthenticated);
         }
         match state.jwt_service.validate_token(token) {
-            Ok(claims) => {
-                if claims.role != "admin" {
-                    return (StatusCode::FORBIDDEN, "Forbidden").into_response();
-                }
-            }
-            Err(_) => return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
+            Ok(claims) => match Uuid::parse_str(&claims.sub) {
+                Ok(id) => id,
+                Err(_) => return Ok(AdminGate::Unauthenticated),
+            },
+            Err(_) => return Ok(AdminGate::Unauthenticated),
         }
+    } else if let Some(cookie) = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_refresh_cookie)
+    {
+        match state.session_service.validate_refresh_token(&cookie).await {
+            Ok(token) => token.user_id,
+            Err(_) => return Ok(AdminGate::Unauthenticated),
+        }
+    } else {
+        return Ok(AdminGate::Unauthenticated);
+    };
+
+    match UserRepository::find_by_id(state.db.pool(), user_id).await? {
+        Some(user) if user.role == UserRole::Admin => Ok(AdminGate::Admin),
+        Some(_) => Ok(AdminGate::Forbidden),
+        None => Ok(AdminGate::Unauthenticated),
     }
-    HtmlResponse(versioned(html)).into_response()
+}
+
+/// Pull the refresh-session cookie value, if present, out of a `Cookie` header.
+fn parse_refresh_cookie(header: &str) -> Option<String> {
+    header.split(';').find_map(|part| {
+        part.trim()
+            .strip_prefix(REFRESH_COOKIE_NAME)
+            .and_then(|rest| rest.strip_prefix('='))
+            .map(str::to_owned)
+    })
 }
 
 /// Build a full app with API routes + UI fallback (mirrors main.rs structure).
@@ -152,6 +203,31 @@ async fn get_page_auth(app: &Router, path: &str, token: &str) -> (StatusCode, St
     (status, body)
 }
 
+/// GET a page carrying only the httpOnly refresh-session cookie — this is how
+/// a browser navigation lands on the page after login.
+async fn get_page_cookie(app: &Router, path: &str, cookie: &str) -> (StatusCode, String) {
+    use axum::body::Body;
+
+    let request = axum::http::Request::builder()
+        .method("GET")
+        .uri(path)
+        .header("cookie", format!("{REFRESH_COOKIE_NAME}={cookie}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = tower::ServiceExt::oneshot(app.clone(), request)
+        .await
+        .expect("Failed to send request");
+    let status = resp.status();
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, String::from_utf8(body).unwrap_or_default())
+}
+
 // ─── Page Rendering Tests ──────────────────────────────────────────────────
 
 #[tokio::test]
@@ -165,16 +241,19 @@ async fn test_login_page_renders() {
 
 #[tokio::test]
 async fn test_login_page_alias() {
+    // `/auth/login` is the API's POST-only login endpoint; GET on it is 405.
+    // The login *page* lives at `/login` (covered by test_login_page_renders).
     let (app, _state) = build_full_app().await;
     let (status, _) = get_page(&app, "/auth/login").await;
-    assert_eq!(status, 200);
+    assert_eq!(status, 405);
 }
 
 #[tokio::test]
 async fn test_register_page_blocked_by_default() {
     let (app, _state) = build_full_app().await;
     let resp = helpers::get_no_auth(&app, "/register").await;
-    assert_eq!(resp.status(), 302);
+    // axum's `Redirect::to` issues 303 See Other.
+    assert_eq!(resp.status(), 303);
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
     assert!(location.contains("/login"));
 }
@@ -271,15 +350,16 @@ async fn test_bots_page_renders() {
 }
 
 #[tokio::test]
-async fn test_docs_page_no_token_returns_200_or_401() {
+async fn test_docs_page_no_credentials_unauthorized() {
     let (app, state) = build_full_app().await;
     let (_uid, _u, _email, _password) =
         helpers::create_test_user(&state.db, UserRole::Admin, "pass123").await;
 
+    // Anonymous browsers must never be served the admin page shell.
     let (status, _) = get_page(&app, "/docs").await;
-    assert!(
-        status == 200 || status == 401,
-        "docs without token should return 200 (no header checked) or 401, got {status}"
+    assert_eq!(
+        status, 401,
+        "docs without credentials must be rejected, got {status}"
     );
 }
 
@@ -309,15 +389,77 @@ async fn test_docs_page_admin_allowed() {
 }
 
 #[tokio::test]
-async fn test_orphans_page_no_token_returns_200_or_401() {
+async fn test_docs_page_admin_via_refresh_cookie_allowed() {
+    let (app, state) = build_full_app().await;
+    let (uid, _u, _email, _password) =
+        helpers::create_test_user(&state.db, UserRole::Admin, "pass123").await;
+
+    // Browser navigation after login carries the httpOnly refresh cookie but
+    // no Authorization header; the session must be validated server-side.
+    let (refresh_token, _row) = state
+        .session_service
+        .create_refresh_token(uid)
+        .await
+        .expect("create refresh token");
+    let (status, body) = get_page_cookie(&app, "/docs", &refresh_token).await;
+    assert_eq!(status, 200, "admin refresh cookie should unlock /docs");
+    assert!(
+        body.contains("API") || body.contains("api") || body.contains("docs") || body.contains("Docs")
+    );
+}
+
+#[tokio::test]
+async fn test_docs_page_non_admin_via_refresh_cookie_forbidden() {
+    let (app, state) = build_full_app().await;
+    let (uid, _u, _email, _password) =
+        helpers::create_test_user(&state.db, UserRole::User, "pass123").await;
+
+    let (refresh_token, _row) = state
+        .session_service
+        .create_refresh_token(uid)
+        .await
+        .expect("create refresh token");
+    let (status, _) = get_page_cookie(&app, "/docs", &refresh_token).await;
+    assert_eq!(status, 403, "non-admin refresh cookie must be rejected");
+}
+
+#[tokio::test]
+async fn test_docs_page_stale_admin_jwt_rejected_after_demotion() {
+    let (app, state) = build_full_app().await;
+    let (admin_a_id, _ua, _aemail, _apw) =
+        helpers::create_test_user(&state.db, UserRole::Admin, "pass123").await;
+    let (_admin_b_id, _ub, bemail, bpw) =
+        helpers::create_test_user(&state.db, UserRole::Admin, "pass123").await;
+    let admin_b_token = helpers::login_user(&app, &bemail, &bpw).await;
+
+    // Admin A still holds a valid, unexpired JWT claiming role=admin...
+    let admin_a_token = helpers::login_user(&app, &_aemail, &_apw).await;
+    // ...but admin B demotes A in the database.
+    let resp = helpers::json_put_auth(
+        &app,
+        "/api/admin/users/update",
+        &serde_json::json!({ "id": admin_a_id.to_string(), "role": "user" }),
+        &admin_b_token,
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "demotion should succeed");
+
+    // The stale JWT must not unlock the page: the role is read from the DB.
+    let (status, _) = get_page_auth(&app, "/docs", &admin_a_token).await;
+    assert_eq!(status, 403, "demoted admin must lose page access immediately");
+}
+
+#[tokio::test]
+async fn test_orphans_page_no_credentials_unauthorized() {
     let (app, state) = build_full_app().await;
     let (_uid, _u, _email, _password) =
         helpers::create_test_user(&state.db, UserRole::Admin, "pass123").await;
 
+    // Anonymous browsers must never be served the admin page shell.
     let (status, _) = get_page(&app, "/orphans").await;
-    assert!(
-        status == 200 || status == 401,
-        "orphans without token should return 200 or 401, got {status}"
+    assert_eq!(
+        status, 401,
+        "orphans without credentials must be rejected, got {status}"
     );
 }
 
@@ -345,6 +487,22 @@ async fn test_orphans_page_admin_allowed() {
 }
 
 #[tokio::test]
+async fn test_orphans_page_admin_via_refresh_cookie_allowed() {
+    let (app, state) = build_full_app().await;
+    let (uid, _u, _email, _password) =
+        helpers::create_test_user(&state.db, UserRole::Admin, "pass123").await;
+
+    let (refresh_token, _row) = state
+        .session_service
+        .create_refresh_token(uid)
+        .await
+        .expect("create refresh token");
+    let (status, body) = get_page_cookie(&app, "/orphans", &refresh_token).await;
+    assert_eq!(status, 200, "admin refresh cookie should unlock /orphans");
+    assert!(body.contains("Orphan") || body.contains("orphan"));
+}
+
+#[tokio::test]
 async fn test_unknown_page_returns_404() {
     let (app, state) = build_full_app().await;
     let (_uid, _u, _email, _password) =
@@ -357,12 +515,27 @@ async fn test_unknown_page_returns_404() {
 // ─── HTML Structure Tests ──────────────────────────────────────────────────
 
 #[test]
-fn test_login_html_has_alpine_directive() {
+fn test_login_html_has_submit_handler() {
     let html = versioned(LOGIN_HTML);
-    assert!(html.contains("x-data"), "login page should use Alpine.js x-data");
+    // The login page was migrated from Alpine.js to plain JS (the other pages
+    // still use Alpine; see the sibling `*_html_has_alpine_directive` tests).
     assert!(
-        html.contains("x-on:submit") || html.contains("@submit"),
-        "login page should have form submit handler"
+        html.contains("onsubmit=\"submitLogin(event)\""),
+        "login page should have a submit handler"
+    );
+    assert!(
+        html.contains("fetch('/auth/login'"),
+        "login page should POST credentials to the /auth/login API"
+    );
+    // Security invariant: the access token goes to localStorage, but the
+    // refresh token must only ever live in the server's httpOnly cookie.
+    assert!(
+        html.contains("localStorage.setItem('token'"),
+        "login page should persist the access token for the SPA"
+    );
+    assert!(
+        !html.contains("localStorage.setItem('refresh"),
+        "refresh token must never be persisted in JS-accessible storage"
     );
 }
 

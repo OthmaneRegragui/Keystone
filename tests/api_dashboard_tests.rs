@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use bytes::Bytes;
-use http_body_util::BodyExt;
 use keystone::db::repos::{BucketRepository, GroupRepository};
 use keystone::models::UserRole;
 use keystone::AppState;

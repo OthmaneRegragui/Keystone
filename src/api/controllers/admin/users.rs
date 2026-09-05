@@ -163,6 +163,16 @@ pub async fn update_user(
         None => None,
     };
 
+    // An admin must never be able to strip their own role: a misclick in the
+    // admin UI would permanently lock that account out of admin functions.
+    // (The "last admin" guard lives in UserRepository::update_user so it is
+    // applied atomically at the database level.)
+    if uid == auth.user_id && role_str.is_some_and(|r| r != "admin") {
+        return Err(AppError::BadRequest(
+            "you cannot demote your own account".into(),
+        ));
+    }
+
     UserRepository::update_user(
         state.db.pool(),
         uid,

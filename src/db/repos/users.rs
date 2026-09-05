@@ -282,8 +282,21 @@ impl UserRepository {
         let new_role = role.unwrap_or(&default_role);
         let new_hash = password_hash.unwrap_or(&current.password_hash);
 
+        // The WHERE clause is an atomic "last admin" guard. The update is
+        // allowed when the role is not changing at all (e.g. email/password
+        // edits), when the target is being promoted to admin, or when the
+        // demotion still leaves at least one other admin behind. Only the
+        // final case — demoting the last admin — is rejected. Doing this in
+        // SQL — not by counting rows in Rust — closes the race where two
+        // admins demote each other concurrently and leave the platform with
+        // zero admins.
         let affected = sqlx::query(
-            "UPDATE users SET email = $1, role = $2, password_hash = $3, updated_at = $4 WHERE id = $5",
+            "UPDATE users SET email = $1, role = $2, password_hash = $3, updated_at = $4 \
+             WHERE id = $5 AND (\
+                $2 = (SELECT role FROM users WHERE id = $5) \
+                OR $2 = 'admin' \
+                OR EXISTS (SELECT 1 FROM users WHERE role = 'admin' AND id <> $5)\
+             )",
         )
         .bind(new_email)
         .bind(new_role)
@@ -296,6 +309,13 @@ impl UserRepository {
         .rows_affected();
 
         if affected == 0 {
+            // Either the user was removed concurrently, or the update would
+            // have demoted the last admin. Distinguish the two for the caller.
+            if Self::find_by_id(pool, id).await?.is_some() {
+                return Err(AppError::BadRequest(
+                    "cannot demote the last admin; the platform needs at least one admin".into(),
+                ));
+            }
             return Err(AppError::NotFound(format!("user {id} not found")));
         }
         Ok(())

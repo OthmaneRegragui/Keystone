@@ -14,6 +14,10 @@ use crate::db::rows::share_row::CreateSharedItemData;
 use crate::models::share::SharedItemType;
 use crate::AppState;
 
+/// Hard cap on recipients per share request. Without it, one request could
+/// trigger an unbounded number of email lookups and share inserts (minor DoS).
+const MAX_SHARE_RECIPIENTS: usize = 100;
+
 /// Share files or folders with other users by email.
 /// POST /api/share
 pub async fn share_item(
@@ -22,6 +26,12 @@ pub async fn share_item(
     Json(body): Json<ShareItemRequest>,
 ) -> AppResult<Json<ShareResultDto>> {
     auth_user.require_scope("files:write")?;
+
+    if body.emails.len() > MAX_SHARE_RECIPIENTS {
+        return Err(AppError::BadRequest(format!(
+            "too many recipients: at most {MAX_SHARE_RECIPIENTS} emails per share request"
+        )));
+    }
 
     let item_type = SharedItemType::parse(&body.item_type)
         .ok_or_else(|| AppError::BadRequest("item_type must be 'file' or 'folder'".into()))?;

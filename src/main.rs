@@ -15,12 +15,15 @@ use keystone::AppState;
 use keystone::api::middleware::{
     assign_request_id, catch_panic, rate_limit, request_logging, security_headers, RateLimiter,
 };
-use keystone::utils::auth::jwt::JwtService;
-use keystone::utils::auth::session::SessionService;
 use keystone::db::Database;
 use keystone::db::repos::{AdminSettingRepository, BucketRepository, UserRepository};
+use keystone::error::AppResult;
+use keystone::models::UserRole;
 use keystone::storage::StorageRegistry;
 use keystone::storage::local::LocalFsBackend;
+use keystone::utils::auth::jwt::JwtService;
+use keystone::utils::auth::session::{REFRESH_COOKIE_NAME, SessionService};
+use uuid::Uuid;
 
 const DASHBOARD_HTML: &str = include_str!("static/dashboard.html");
 const FILES_HTML: &str = include_str!("static/files.html");
@@ -106,7 +109,8 @@ async fn main() {
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(30);
-    let session_service = SessionService::new(refresh_expiry_days.saturating_mul(24 * 60));
+    let session_service =
+        SessionService::new(db.pool().clone(), refresh_expiry_days.saturating_mul(24 * 60));
 
     let mut storage = StorageRegistry::new();
 
@@ -322,33 +326,83 @@ async fn ui_handler(
 
 struct HtmlResponse(String);
 
-/// Serve an admin-only page. The UI authenticates via the Authorization
-/// header (JWT stored in localStorage), so we can only enforce this when the
-/// header is present; plain browser navigation relies on the client-side
-/// role guard in each page.
+/// Serve an admin-only page. The caller must prove an admin identity either
+/// through the Bearer JWT (Authorization header) or the httpOnly refresh
+/// session cookie — both are resolved to a user id and the role is re-checked
+/// against the live database row before any HTML is served. Anonymous callers
+/// get 401 and authenticated non-admins get 403, so the admin UI shell is
+/// never served to unauthenticated browsers (a stale-but-valid JWT for a
+/// demoted user is rejected because the role claim is not trusted on its own).
 async fn admin_page(
     headers: axum::http::HeaderMap,
     state: &Arc<AppState>,
     html: &'static str,
 ) -> Response {
-    if let Some(auth) = headers
+    match admin_identity(&headers, state).await {
+        Ok(AdminGate::Admin) => HtmlResponse(versioned(html)).into_response(),
+        Ok(AdminGate::Forbidden) => (StatusCode::FORBIDDEN, "Forbidden").into_response(),
+        Ok(AdminGate::Unauthenticated) => (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response(),
+    }
+}
+
+enum AdminGate {
+    Admin,
+    Forbidden,
+    Unauthenticated,
+}
+
+/// Resolve a request to an admin identity. Mirrors how the API extracts the
+/// authenticated user: the credential (JWT or refresh cookie) is validated,
+/// then the role is read from the `users` table rather than from the token.
+async fn admin_identity(
+    headers: &axum::http::HeaderMap,
+    state: &Arc<AppState>,
+) -> AppResult<AdminGate> {
+    let user_id: Uuid = if let Some(auth) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
     {
         let (scheme, token) = auth.split_once(' ').unwrap_or(("", auth));
         if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() {
-            return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+            return Ok(AdminGate::Unauthenticated);
         }
         match state.jwt_service.validate_token(token) {
-            Ok(claims) => {
-                if claims.role != "admin" {
-                    return (StatusCode::FORBIDDEN, "Forbidden").into_response();
-                }
-            }
-            Err(_) => return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
+            Ok(claims) => match Uuid::parse_str(&claims.sub) {
+                Ok(id) => id,
+                Err(_) => return Ok(AdminGate::Unauthenticated),
+            },
+            Err(_) => return Ok(AdminGate::Unauthenticated),
         }
+    } else if let Some(cookie) = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_refresh_cookie)
+    {
+        match state.session_service.validate_refresh_token(&cookie).await {
+            Ok(token) => token.user_id,
+            Err(_) => return Ok(AdminGate::Unauthenticated),
+        }
+    } else {
+        return Ok(AdminGate::Unauthenticated);
+    };
+
+    match UserRepository::find_by_id(state.db.pool(), user_id).await? {
+        Some(user) if user.role == UserRole::Admin => Ok(AdminGate::Admin),
+        Some(_) => Ok(AdminGate::Forbidden),
+        None => Ok(AdminGate::Unauthenticated),
     }
-    HtmlResponse(versioned(html)).into_response()
+}
+
+/// Pull the refresh-session cookie value, if present, out of a `Cookie` header.
+/// The value is opaque and is validated against the database before use.
+fn parse_refresh_cookie(header: &str) -> Option<String> {
+    header.split(';').find_map(|part| {
+        part.trim()
+            .strip_prefix(REFRESH_COOKIE_NAME)
+            .and_then(|rest| rest.strip_prefix('='))
+            .map(str::to_owned)
+    })
 }
 
 fn versioned(html: &'static str) -> String {

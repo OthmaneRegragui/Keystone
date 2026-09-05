@@ -957,7 +957,7 @@ async fn test_bot_path_rules_restrict_access() {
         .unwrap();
     let resp1 = tower::ServiceExt::oneshot(app.clone(), req1).await.unwrap();
     assert_eq!(resp1.status(), 200);
-    let root_file_id = helpers::response_json(resp1).await["file"]["id"]
+    let root_file_id = helpers::response_json(resp1).await["file"]["user_file_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -972,7 +972,7 @@ async fn test_bot_path_rules_restrict_access() {
         .unwrap();
     let resp2 = tower::ServiceExt::oneshot(app.clone(), req2).await.unwrap();
     assert_eq!(resp2.status(), 200);
-    let inside_file_id = helpers::response_json(resp2).await["file"]["id"]
+    let inside_file_id = helpers::response_json(resp2).await["file"]["user_file_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -997,7 +997,7 @@ async fn test_bot_path_rules_restrict_access() {
     let json = helpers::response_json(resp).await;
     let files = json["files"].as_array().unwrap();
     assert_eq!(files.len(), 1, "folder listing should show the allowed file");
-    assert_eq!(files[0]["id"], inside_file_id);
+    assert_eq!(files[0]["user_file_id"], inside_file_id);
 
     // Listing the root only shows root-level files, and none are allowed.
     let resp = helpers::get_auth(&app, "/api/bot/files?bucket=default", &bot_key).await;

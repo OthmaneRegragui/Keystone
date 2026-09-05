@@ -659,7 +659,7 @@ async fn test_group_permission_flags_for_user() {
         .unwrap());
 
     // No membership at all -> still false.
-    GroupRepository::update_permissions(pool, &g_on.id, true, true, false)
+    GroupRepository::update_permissions(pool, &g_on.id, true, true, false, false)
         .await
         .unwrap();
     assert!(!GroupRepository::user_allows_api_keys(pool, &user_id)
@@ -685,7 +685,7 @@ async fn test_group_permission_flags_for_user() {
         .unwrap());
 
     // Turning the permissive group's password flag back off blocks again.
-    GroupRepository::update_permissions(pool, &g_on.id, true, false, false)
+    GroupRepository::update_permissions(pool, &g_on.id, true, false, false, false)
         .await
         .unwrap();
     assert!(GroupRepository::user_allows_api_keys(pool, &user_id)
