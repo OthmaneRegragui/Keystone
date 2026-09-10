@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::Read;
 use std::sync::Arc;
 
@@ -18,6 +19,7 @@ use crate::db::repos::users::UserRepository;
 use crate::db::rows::{CreateStorageObjectData, FileRecord, FolderRecord, UserFileRecord};
 use crate::dto::BucketIndexExportDto;
 use crate::error::{AppError, AppResult};
+use crate::models::File;
 use crate::utils::hashing::blake3::hash_bytes;
 use crate::utils::names::validate_component_name;
 use crate::AppState;
@@ -169,20 +171,23 @@ pub async fn import_bucket_zip(
         )));
     }
 
-    // Pick a storage backend (first available)
-    let backend_name = {
-        let storage = state.storage.read().await;
-        let backends = storage.list_backends();
-        if backends.is_empty() {
-            return Err(AppError::Internal("no storage backends configured".into()));
-        }
-        backends[0].clone()
-    };
+    // The target bucket is also the storage backend for this import: buckets
+    // keep their own physical copies, so every blob lands in this bucket's own
+    // storage directory rather than a shared "first available" backend.
+    let backend_name = bucket_name.clone();
 
     let mut result = ImportResult {
         files_imported: 0,
         folders_created: 0,
         errors: Vec::new(),
+    };
+
+    // Pre-fetch known bucket names so we can strip any leading bucket prefix
+    // from ZIP paths. This lets export ZIPs from *any* bucket be imported
+    // into this bucket without manual path rewriting.
+    let known_buckets: Vec<String> = match BucketRepository::list(state.db.pool()).await {
+        Ok(buckets) => buckets.into_iter().map(|b| b.name).collect(),
+        Err(_) => Vec::new(),
     };
 
     let mut total_uncompressed: u64 = 0;
@@ -191,7 +196,7 @@ pub async fn import_bucket_zip(
     for i in 0..archive.len() {
         // ── Extract metadata + data from the entry synchronously ──
         // (ZipFile is not Send, so we must drop it before any .await)
-        let (entry_path, username, file_name, folder_segments, data_or_err) = {
+        let (entry_path, username, file_name, folder_segments, raw_key, data_or_err) = {
             let mut entry = match archive.by_index(i) {
                 Ok(e) => e,
                 Err(e) => {
@@ -214,15 +219,34 @@ pub async fn import_bucket_zip(
                 continue;
             }
 
-            // Parse path: username / folder_path... / file_name
+            // Normalise path: strip optional leading bucket name prefix so
+            // export ZIPs from *any* bucket can be imported here.
             let normalized = entry_path.replace('\\', "/");
             let trimmed = normalized.trim_start_matches('/');
+
+            // If the first segment matches any known bucket, strip it
+            let trimmed = if let Some(first_slash) = trimmed.find('/') {
+                let first_segment = &trimmed[..first_slash];
+                if known_buckets.iter().any(|b| b == first_segment) {
+                    &trimmed[first_slash + 1..]
+                } else {
+                    trimmed
+                }
+            } else {
+                trimmed
+            };
+
+            // Raw backups (the raw storage-tree export) contain entries whose
+            // tail is the blake3 shard path `xx/yy/<hash>`. They carry no owner
+            // metadata, so they are restored as content-addressed blobs only.
+            let raw_key = raw_blob_key(trimmed);
+
             let parts: Vec<&str> = trimmed.split('/').collect();
 
             if parts.len() < 2 {
                 result
                     .errors
-                    .push(format!("skipped '{}': path must be username/file", entry_path));
+                    .push(format!("skipped '{}': path must be username/file or bucket/username/file", entry_path));
                 continue;
             }
 
@@ -250,7 +274,7 @@ pub async fn import_bucket_zip(
                 }
             };
 
-            (entry_path, username, file_name, folder_segments, read_result)
+            (entry_path, username, file_name, folder_segments, raw_key, read_result)
         }; // ZipFile dropped here – safe to .await now
 
         let data = match data_or_err {
@@ -271,6 +295,13 @@ pub async fn import_bucket_zip(
         }
 
         // ── Async operations start here ──
+
+        // Raw storage-tree entry (no owner metadata) — restore the blob only;
+        // the indexer JSON brings the user links afterwards.
+        if let Some(_raw_key) = &raw_key {
+            store_blob_by_hash(&state, &backend_name, data.clone(), &entry_path, &mut result).await;
+            continue;
+        }
 
         // Find or skip user
         let user = match UserRepository::find_by_username(state.db.pool(), &username).await {
@@ -451,15 +482,10 @@ pub async fn import_bucket_file(
         None
     };
 
-    // Pick a storage backend
-    let backend_name = {
-        let storage = state.storage.read().await;
-        let backends = storage.list_backends();
-        if backends.is_empty() {
-            return Err(AppError::Internal("no storage backends configured".into()));
-        }
-        backends[0].clone()
-    };
+    // The target bucket is also the storage backend for this import: buckets
+    // keep their own physical copies, so every blob lands in this bucket's own
+    // storage directory rather than a shared "first available" backend.
+    let backend_name = bucket_name.clone();
 
     let hash = import_file_data(
         &state,
@@ -495,15 +521,9 @@ pub async fn import_bucket_index(
 ) -> AppResult<Json<ImportResult>> {
     auth.require_admin()?;
 
-    // Verify bucket name in JSON matches URL
-    if payload.bucket != bucket_name {
-        return Err(AppError::BadRequest(format!(
-            "JSON bucket name '{}' does not match URL bucket name '{}'",
-            payload.bucket, bucket_name
-        )));
-    }
-
-    // Verify bucket exists
+    // Verify bucket exists (the JSON bucket name is informational; the URL
+    // parameter determines the target bucket so backups can be restored
+    // across buckets with different names/paths).
     BucketRepository::find_by_name(state.db.pool(), &bucket_name)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("bucket '{}' not found", bucket_name)))?;
@@ -615,16 +635,20 @@ pub async fn import_bucket_index(
                 }
             };
 
-            // Skip if this user already has this file linked
-            match UserFileRepository::find_by_user_and_file(
+            // Skip only if this user already has this file linked by the same
+            // name IN THIS BUCKET — a link in another bucket must not prevent
+            // the restore from materialising the file in the target bucket.
+            match UserFileRepository::find_active_in_bucket_by_user_file_and_name(
                 state.db.pool(),
                 user.id,
                 existing_file.id,
+                &file_dto.name,
+                &bucket_name,
             )
             .await
             {
                 Ok(Some(_)) => {
-                    // Already exists — skip silently (idempotent)
+                    // Already linked in this bucket — skip silently (idempotent)
                     continue;
                 }
                 Ok(None) => { /* proceed */ }
@@ -728,11 +752,128 @@ struct ZipEntryData {
     data: Bytes,
 }
 
+/// Detect a raw storage-tree blob entry (produced by the raw export). Such
+/// entries end with the blake3 shard path `xx/yy/<hash>` — possibly behind
+/// leading bucket/path segments. Returns the bucket-relative storage key
+/// (`xx/yy/<hash>`) when it matches.
+fn raw_blob_key(path: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let n = parts.len();
+    let hash = parts[n - 1];
+    let shard1 = parts[n - 2];
+    let shard0 = parts[n - 3];
+    let is_hex = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit());
+    if shard0.len() == 2 && shard1.len() == 2 && is_hex(shard0) && is_hex(shard1) && hash.len() >= 32 && is_hex(hash)
+    {
+        Some(format!("{shard0}/{shard1}/{hash}"))
+    } else {
+        None
+    }
+}
+
+/// Ensure the bucket `backend_name` holds its own physical copy of the blob
+/// with hash `hash`, registering a `storage_object` for it. Buckets are
+/// independent storage scopes — a backup restored into one bucket must not
+/// depend on another bucket's copy — so a copy is materialized into this
+/// bucket's backend even when the same content already exists elsewhere.
+/// Within a single bucket, content is deduplicated by hash. Returns the file
+/// record and whether its `files` row was created here (a brand-new blob
+/// already starts with ref_count = 1 for the link that follows).
+async fn ensure_blob_in_backend(
+    state: &AppState,
+    backend_name: &str,
+    hash: &str,
+    data: &Bytes,
+    mime_type: Option<&str>,
+) -> AppResult<(File, bool)> {
+    if let Some(existing) = FileRepository::find_by_hash(state.db.pool(), hash).await? {
+        let objects =
+            StorageObjectRepository::find_by_file_id(state.db.pool(), existing.id).await?;
+        if objects.iter().any(|o| o.backend == backend_name) {
+            // This bucket already has a copy — no-op.
+            return Ok((existing, false));
+        }
+        // Same content exists in another bucket — give this bucket its own copy.
+        let storage_key = format!("{}/{}/{}", &hash[..2], &hash[2..4], hash);
+        {
+            let storage = state.storage.read().await;
+            let backend = storage.get(backend_name).ok_or_else(|| {
+                AppError::Internal(format!("storage backend '{backend_name}' not found"))
+            })?;
+            backend
+                .put(&storage_key, data.clone())
+                .await
+                .map_err(|e| AppError::Storage(e.to_string()))?;
+        }
+        let storage_obj = CreateStorageObjectData {
+            file_id: existing.id,
+            backend: backend_name.to_string(),
+            storage_path: storage_key,
+        };
+        StorageObjectRepository::create(state.db.pool(), storage_obj).await?;
+        Ok((existing, false))
+    } else {
+        // Brand-new content — create the files row and this bucket's copy.
+        let storage_key = format!("{}/{}/{}", &hash[..2], &hash[2..4], hash);
+        {
+            let storage = state.storage.read().await;
+            let backend = storage.get(backend_name).ok_or_else(|| {
+                AppError::Internal(format!("storage backend '{backend_name}' not found"))
+            })?;
+            backend
+                .put(&storage_key, data.clone())
+                .await
+                .map_err(|e| AppError::Storage(e.to_string()))?;
+        }
+        let file_record = FileRecord::new(
+            hash.to_string(),
+            storage_key.clone(),
+            mime_type.map(|s| s.to_string()),
+            data.len() as i64,
+        );
+        let file = FileRepository::create(state.db.pool(), file_record).await?;
+        let storage_obj = CreateStorageObjectData {
+            file_id: file.id,
+            backend: backend_name.to_string(),
+            storage_path: storage_key,
+        };
+        StorageObjectRepository::create(state.db.pool(), storage_obj).await?;
+        Ok((file, true))
+    }
+}
+
+/// Store a blob by its blake3 hash into this bucket's own backend. Used for
+/// raw storage-tree entries that carry no owner metadata (they are never
+/// linked to a user here, so no ref_count adjustment is made).
+async fn store_blob_by_hash(
+    state: &AppState,
+    backend_name: &str,
+    data: Bytes,
+    entry_path: &str,
+    result: &mut ImportResult,
+) {
+    let hash = hash_bytes(&data).await;
+    match ensure_blob_in_backend(state, backend_name, &hash, &data, None).await {
+        Ok(_) => result.files_imported += 1,
+        Err(e) => result
+            .errors
+            .push(format!("failed to store blob for '{entry_path}': {e}")),
+    }
+}
+
 /// Import both a ZIP (file data) and JSON (index structure) into a bucket.
-/// The ZIP should contain files organised as `bucket_name/username/path/to/file.ext`
-/// (same as export-zip format). The JSON should be the export-index format.
-/// Files are stored as content-addressed blobs first, then the JSON structure
-/// is used to create folder hierarchies and user_file links.
+/// The ZIP may be the raw storage-tree backup (entries are blobs keyed by
+/// blake3 shard path, stored content-addressed) or the logical layout
+/// `username/path/to/file.ext`. An optional `bucket_name/` prefix from legacy
+/// exports is tolerated and stripped, so backups are portable across buckets
+/// with different names/paths. The JSON should be the export-index format.
+/// Files are stored as content-addressed blobs in this bucket's own backend
+/// (each bucket keeps its own physical copy — a restored backup never depends
+/// on another bucket), then the JSON structure is used to create folder
+/// hierarchies and user_file links in this bucket.
 pub async fn import_bucket_combined(
     State(state): State<Arc<AppState>>,
     auth: AuthUser,
@@ -800,13 +941,9 @@ pub async fn import_bucket_combined(
     let payload: BucketIndexExportDto = serde_json::from_str(&json_text)
         .map_err(|e| AppError::BadRequest(format!("invalid index JSON: {e}")))?;
 
-    // Validate bucket name
-    if payload.bucket != bucket_name {
-        return Err(AppError::BadRequest(format!(
-            "JSON bucket name '{}' does not match URL bucket name '{}'",
-            payload.bucket, bucket_name
-        )));
-    }
+    // The JSON bucket name is informational; the URL parameter determines
+    // the target bucket so backups can be restored across buckets with
+    // different names/paths.
 
     if payload.users.len() > MAX_INDEX_USERS {
         return Err(AppError::BadRequest(format!(
@@ -816,20 +953,23 @@ pub async fn import_bucket_combined(
         )));
     }
 
-    // Pick a storage backend
-    let backend_name = {
-        let storage = state.storage.read().await;
-        let backends = storage.list_backends();
-        if backends.is_empty() {
-            return Err(AppError::Internal("no storage backends configured".into()));
-        }
-        backends[0].clone()
-    };
+    // The target bucket is also the storage backend for this import: buckets
+    // keep their own physical copies, so every blob lands in this bucket's own
+    // storage directory rather than a shared "first available" backend.
+    let backend_name = bucket_name.clone();
 
     let mut result = ImportResult {
         files_imported: 0,
         folders_created: 0,
         errors: Vec::new(),
+    };
+
+    // Pre-fetch known bucket names so we can strip any leading bucket prefix
+    // from ZIP paths. This lets export ZIPs from *any* bucket be imported
+    // into this bucket without manual path rewriting.
+    let known_buckets: Vec<String> = match BucketRepository::list(state.db.pool()).await {
+        Ok(buckets) => buckets.into_iter().map(|b| b.name).collect(),
+        Err(_) => Vec::new(),
     };
 
     // ── Step 1: Extract all ZIP entries SYNCHRONOUSLY ──
@@ -874,13 +1014,19 @@ pub async fn import_bucket_combined(
                     continue;
                 }
 
-                // Normalise path: strip optional bucket_name prefix
+                // Normalise path: strip optional leading bucket name prefix so
+                // export ZIPs from *any* bucket can be imported here.
                 let normalized = entry_path.replace('\\', "/");
                 let trimmed = normalized.trim_start_matches('/');
 
-                // If the first segment matches the bucket name, strip it
-                let trimmed = if let Some(rest) = trimmed.strip_prefix(&format!("{}/", bucket_name)) {
-                    rest
+                // If the first segment matches any known bucket, strip it
+                let trimmed = if let Some(first_slash) = trimmed.find('/') {
+                    let first_segment = &trimmed[..first_slash];
+                    if known_buckets.iter().any(|b| b == first_segment) {
+                        &trimmed[first_slash + 1..]
+                    } else {
+                        trimmed
+                    }
                 } else {
                     trimmed
                 };
@@ -935,58 +1081,25 @@ pub async fn import_bucket_combined(
     }
     // archive dropped here
 
-    // ── Step 2: Store each ZIP entry as a content-addressed blob ──
+    // ── Step 2: Store each ZIP entry as a content-addressed blob in THIS
+    // bucket's own backend. Buckets keep independent physical copies, so a blob
+    // is stored here even when the same content exists elsewhere; within this
+    // bucket, content is deduplicated. `created_this_import` tracks brand-new
+    // blobs — they already carry ref_count = 1 for the link Step 3 will create,
+    // so Step 3 only bumps ref_count for links to pre-existing content.
+    let mut created_this_import: HashSet<Uuid> = HashSet::new();
     for entry in &zip_entries {
         let hash = hash_bytes(&entry.data).await;
-
-        let existing_file = FileRepository::find_by_hash(state.db.pool(), &hash).await;
-        match existing_file {
-            Ok(Some(f)) => {
-                // Blob already exists — increment ref count
-                let _ = FileRepository::update_ref_count(state.db.pool(), f.id, 1).await;
-            }
-            Ok(None) => {
-                // New blob — store it
-                let storage_key = format!("{}/{}/{}", &hash[..2], &hash[2..4], hash);
-                {
-                    let storage = state.storage.read().await;
-                    if let Some(backend) = storage.get(&backend_name) {
-                        if let Err(e) = backend.put(&storage_key, entry.data.clone()).await {
-                            result.errors.push(format!(
-                                "failed to store blob for '{}': {e}", entry.entry_path
-                            ));
-                            continue;
-                        }
-                    } else {
-                        result.errors.push(format!(
-                            "storage backend '{}' not found", backend_name
-                        ));
-                        continue;
-                    }
-                }
-                let file_record = FileRecord::new(hash.clone(), storage_key.clone(), None, entry.data.len() as i64);
-                match FileRepository::create(state.db.pool(), file_record).await {
-                    Ok(file) => {
-                        let storage_obj = CreateStorageObjectData {
-                            file_id: file.id,
-                            backend: backend_name.clone(),
-                            storage_path: storage_key,
-                        };
-                        let _ = StorageObjectRepository::create(state.db.pool(), storage_obj).await;
-                    }
-                    Err(e) => {
-                        result.errors.push(format!(
-                            "failed to create file record for '{}': {e}", entry.entry_path
-                        ));
-                        continue;
-                    }
+        match ensure_blob_in_backend(&state, &backend_name, &hash, &entry.data, None).await {
+            Ok((file, created)) => {
+                if created {
+                    created_this_import.insert(file.id);
                 }
             }
             Err(e) => {
                 result.errors.push(format!(
-                    "db error storing '{}': {e}", entry.entry_path
+                    "failed to store blob for '{}': {e}", entry.entry_path
                 ));
-                continue;
             }
         }
     }
@@ -1062,11 +1175,12 @@ pub async fn import_bucket_combined(
                 }
             };
 
-            // Check if this user already has this file linked (by user_id + file_id)
-            let already_linked = match UserFileRepository::find_by_user_and_file(
-                state.db.pool(), user.id, existing_file.id,
+            // Check if this user already has this file linked by the same name in
+            // THIS bucket (a link in another bucket does not block a restore).
+            let already_linked = match UserFileRepository::find_active_in_bucket_by_user_file_and_name(
+                state.db.pool(), user.id, existing_file.id, &file_dto.name, &bucket_name,
             ).await {
-                Ok(Some(uf)) => uf.original_name == file_dto.name,
+                Ok(Some(_)) => true,
                 Ok(None) => false,
                 Err(e) => {
                     result.errors.push(format!(
@@ -1148,11 +1262,34 @@ pub async fn import_bucket_combined(
 
             // A row was either restored or freshly created — account for it.
             if restored_id.is_some() || created_row_id.is_some() {
+                // A link to pre-existing content bumps the physical file's
+                // ref_count; brand-new blobs (created in Step 2 of this import)
+                // already start at ref_count = 1, so they must not bump again.
+                let mut bumped_ref = false;
+                if !created_this_import.contains(&existing_file.id) {
+                    if let Err(e) = FileRepository::update_ref_count(
+                        state.db.pool(), existing_file.id, 1,
+                    ).await {
+                        result.errors.push(format!(
+                            "user '{}': file '{}': refcount error: {e}",
+                            user_dto.username, file_dto.name
+                        ));
+                        if let Some(row_id) = created_row_id {
+                            let _ = UserFileRepository::hard_delete_by_id(
+                                state.db.pool(), row_id,
+                            )
+                            .await;
+                        }
+                        continue;
+                    }
+                    bumped_ref = true;
+                }
                 // Charge the user's storage with the REAL blob size — the
                 // size in the JSON is client-controlled and must not drive
                 // storage accounting. Atomic so concurrent imports cannot
                 // lose updates. Enforce the quota: on a rejected reservation,
-                // roll back a freshly created row so no ghost reference is left.
+                // roll back a freshly created row (and the ref_count bump
+                // taken for it) so no ghost reference is left.
                 match UserRepository::charge_storage(
                     state.db.pool(), user.id, existing_file.size,
                 ).await {
@@ -1165,6 +1302,12 @@ pub async fn import_bucket_combined(
                                 state.db.pool(), row_id,
                             )
                             .await;
+                            if bumped_ref {
+                                let _ = FileRepository::update_ref_count(
+                                    state.db.pool(), existing_file.id, -1,
+                                )
+                                .await;
+                            }
                         }
                         result.errors.push(format!(
                             "user '{}': file '{}': storage quota exceeded",
@@ -1177,6 +1320,12 @@ pub async fn import_bucket_combined(
                                 state.db.pool(), row_id,
                             )
                             .await;
+                            if bumped_ref {
+                                let _ = FileRepository::update_ref_count(
+                                    state.db.pool(), existing_file.id, -1,
+                                )
+                                .await;
+                            }
                         }
                         result.errors.push(format!(
                             "user '{}': file '{}': quota charge error: {e}",
@@ -1240,7 +1389,8 @@ async fn resolve_or_create_folders(
     Ok((final_id, created))
 }
 
-/// Hash, deduplicate, store, and create user_file entry for a single file.
+/// Hash, ensure this bucket's own physical copy, and create the user_file
+/// entry for a single file.
 async fn import_file_data(
     state: &AppState,
     backend_name: &str,
@@ -1267,60 +1417,46 @@ async fn import_file_data(
     }
 
     // Track side effects so a downstream failure can roll them back.
-    // `bumped_file_id` is set (on the dedup path) when we incremented an
-    // existing blob's ref_count; `created_file_row` marks a fresh `files` row.
+    // `bumped_file_id` is set when we incremented a PRE-EXISTING blob's
+    // ref_count; a fresh `files` row starts at ref_count = 1 and must not bump.
     let mut bumped_file_id: Option<Uuid> = None;
-    let mut created_file_row = false;
 
     let outcome = (async {
-        // Check for deduplication
-        let existing_file = FileRepository::find_by_hash(state.db.pool(), &hash).await?;
+        // Ensure this bucket holds its own physical copy of the blob — an
+        // import into a bucket must not depend on another bucket's copy.
+        let (file, created_file_row) =
+            ensure_blob_in_backend(state, backend_name, &hash, &data, mime_type).await?;
+        let file_id = file.id;
 
-        let file_id = if let Some(ref existing) = existing_file {
-            // Blob already exists — increment ref count
-            FileRepository::update_ref_count(state.db.pool(), existing.id, 1).await?;
-            bumped_file_id = Some(existing.id);
-            existing.id
-        } else {
-            // New blob — store it
-            let storage_key = format!("{}/{}/{}", &hash[..2], &hash[2..4], hash);
+        // A link to pre-existing content bumps the physical file's ref_count;
+        // a brand-new files row already carries ref_count = 1 for this link.
+        if !created_file_row {
+            FileRepository::update_ref_count(state.db.pool(), file_id, 1).await?;
+            bumped_file_id = Some(file_id);
+        }
 
-            {
-                let storage = state.storage.read().await;
-                let backend = storage
-                    .get(backend_name)
-                    .ok_or_else(|| AppError::Internal(format!("storage backend '{}' not found", backend_name)))?;
-                backend
-                    .put(&storage_key, data.clone())
-                    .await
-                    .map_err(|e| AppError::Internal(format!("failed to store blob: {e}")))?;
-            }
-
-            let file_record = FileRecord::new(hash.clone(), storage_key.clone(), mime_type.map(|s| s.to_string()), data.len() as i64);
-            let file = FileRepository::create(state.db.pool(), file_record).await?;
-            created_file_row = true;
-
-            // Create storage object mapping
-            let storage_obj = CreateStorageObjectData {
-                file_id: file.id,
-                backend: backend_name.to_string(),
-                storage_path: storage_key,
-            };
-            StorageObjectRepository::create(state.db.pool(), storage_obj).await?;
-
-            file.id
-        };
-
-        // Create user_file entry — handle duplicates
-        // Check for an existing active user_file with the same (user_id, file_id, original_name)
+        // Create user_file entry — handle duplicates.
+        // Uniqueness is now per (user_id, file_id, original_name, bucket_name):
+        // a restored backup may link the same file+name into a different
+        // bucket, so only a matching row IN THIS BUCKET is an idempotent no-op.
         if let Some(active_uf) = UserFileRepository::find_by_user_and_file(
             state.db.pool(), user_id, file_id,
         ).await? {
-            // A user_file for this (user_id, file_id) already exists.
-            // The UNIQUE constraint is (user_id, file_id, original_name), so if original_name
-            // also matches, skip entirely (idempotent). Otherwise try to insert.
-            if active_uf.original_name == file_name {
-                // Already linked with same original name — skip
+            if active_uf.original_name == file_name
+                && active_uf.bucket_name.as_deref() == Some(bucket_name)
+            {
+                // Already linked with the same name in this bucket — the
+                // import is a no-op. Roll back the quota reservation and
+                // ref-count bump taken above so they do not leak without a new
+                // user_file row.
+                let _ = UserRepository::release_storage(
+                    state.db.pool(), user_id, data.len() as i64,
+                )
+                .await;
+                let _ = FileRepository::update_ref_count(
+                    state.db.pool(), file_id, -1,
+                )
+                .await;
                 return Ok(file_id);
             }
         }
@@ -1365,14 +1501,13 @@ async fn import_file_data(
                 state.db.pool(), user_id, data.len() as i64,
             )
             .await;
-            // Undo a ref_count bump on the dedup path so a failed import does
-            // not leave the physical blob with an extra reference but no new
-            // user_files row. A freshly created `files` row is left as an
+            // Undo a ref_count bump on pre-existing content so a failed import
+            // does not leave the physical blob with an extra reference but no
+            // new user_files row. A freshly created `files` row is left as an
             // unreferenced blob, which the orphan-cleanup path already handles.
             if let Some(fid) = bumped_file_id {
                 let _ = FileRepository::update_ref_count(state.db.pool(), fid, -1).await;
             }
-            let _ = created_file_row;
             Err(e)
         }
     }

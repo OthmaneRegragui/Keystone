@@ -1,4 +1,5 @@
 pub mod api_keys;
+pub mod audit;
 pub mod bots;
 pub mod buckets;
 pub mod exports;
@@ -11,6 +12,7 @@ pub mod stats;
 pub mod users;
 
 pub use api_keys::*;
+pub use audit::*;
 pub use bots::*;
 pub use buckets::*;
 pub use exports::*;

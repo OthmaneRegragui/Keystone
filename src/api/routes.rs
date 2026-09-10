@@ -102,6 +102,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
                 )
                 .nest("/admin", axum::Router::new()
                     .route("/stats", axum::routing::get(crate::api::controllers::admin::get_stats))
+                    .route("/audit", axum::routing::get(crate::api::controllers::admin::audit::run_audit))
                     .route("/orphaned-files", axum::routing::get(crate::api::controllers::admin::list_orphaned_files).delete(crate::api::controllers::admin::delete_all_orphaned_files))
                     .route("/orphaned-files/facets", axum::routing::get(crate::api::controllers::admin::list_orphaned_file_facets))
                     .route("/orphaned-files/:id", axum::routing::delete(crate::api::controllers::admin::delete_orphaned_file))

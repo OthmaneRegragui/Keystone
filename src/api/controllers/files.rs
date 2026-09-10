@@ -6,7 +6,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use crate::error::{AppError, AppResult};
-use crate::models::{File, SharedItemType, UserFile};
+use crate::models::{File, SharedItemType, StorageObject, UserFile};
 use crate::db::rows::{CreateStorageObjectData, FileRecord, FolderRecord, UserFileRecord};
 use crate::db::repos::{
     buckets::AccessibleBucket, BotRepository, BucketRepository, FileRepository,
@@ -740,9 +740,22 @@ async fn serve_file(
 
     let storage_objects =
         StorageObjectRepository::find_by_file_id(state.db.pool(), file.id).await?;
-    let storage_obj = storage_objects
-        .first()
-        .ok_or_else(|| AppError::NotFound("file not found in storage".into()))?;
+    // Prefer the copy that lives in this file's own bucket, then any copy on a
+    // currently-registered backend — buckets keep independent physical copies,
+    // so a file may exist in several, and we must never serve from a backend
+    // that no longer exists.
+    let storage_obj = {
+        let storage = state.storage.read().await;
+        let registered = |so: &StorageObject| storage.get(&so.backend).is_some();
+        user_file
+            .bucket_name
+            .as_deref()
+            .and_then(|bn| storage_objects.iter().find(|so| so.backend == bn && registered(so)))
+            .or_else(|| storage_objects.iter().find(|so| registered(so)))
+            .or_else(|| storage_objects.first())
+            .cloned()
+    }
+    .ok_or_else(|| AppError::NotFound("file not found in storage".into()))?;
 
     let backend = {
         let storage = state.storage.read().await;
@@ -918,9 +931,19 @@ pub async fn verify_file(
 
     let storage_objects =
         StorageObjectRepository::find_by_file_id(state.db.pool(), file.id).await?;
-    let storage_obj = storage_objects
-        .first()
-        .ok_or_else(|| AppError::NotFound("file not found in storage".into()))?;
+    // Prefer the copy in this file's own bucket, then any registered backend.
+    let storage_obj = {
+        let storage = state.storage.read().await;
+        let registered = |so: &StorageObject| storage.get(&so.backend).is_some();
+        user_file
+            .bucket_name
+            .as_deref()
+            .and_then(|bn| storage_objects.iter().find(|so| so.backend == bn && registered(so)))
+            .or_else(|| storage_objects.iter().find(|so| registered(so)))
+            .or_else(|| storage_objects.first())
+            .cloned()
+    }
+    .ok_or_else(|| AppError::NotFound("file not found in storage".into()))?;
 
     let backend = {
         let storage = state.storage.read().await;

@@ -12,6 +12,7 @@ use crate::error::{AppError, AppResult};
 use crate::db::repos::{ShareRepository, FolderRepository, UserFileRepository, FileRepository, GroupRepository, AdminSettingRepository, StorageObjectRepository};
 use crate::db::rows::share_row::CreateSharedItemData;
 use crate::models::share::SharedItemType;
+use crate::models::StorageObject;
 use crate::AppState;
 
 /// Hard cap on recipients per share request. Without it, one request could
@@ -322,8 +323,21 @@ pub async fn download_shared_file(
         .ok_or_else(|| AppError::Internal("physical file not found".into()))?;
 
     let storage_objects = StorageObjectRepository::find_by_file_id(state.db.pool(), file.id).await?;
-    let storage_obj = storage_objects.first()
-        .ok_or_else(|| AppError::NotFound("file not found in storage".into()))?;
+    // Prefer the copy in this file's own bucket, then any registered backend —
+    // buckets keep independent physical copies, so never serve from a backend
+    // that no longer exists.
+    let storage_obj = {
+        let storage = state.storage.read().await;
+        let registered = |so: &StorageObject| storage.get(&so.backend).is_some();
+        user_file
+            .bucket_name
+            .as_deref()
+            .and_then(|bn| storage_objects.iter().find(|so| so.backend == bn && registered(so)))
+            .or_else(|| storage_objects.iter().find(|so| registered(so)))
+            .or_else(|| storage_objects.first())
+            .cloned()
+    }
+    .ok_or_else(|| AppError::NotFound("file not found in storage".into()))?;
 
     let backend = {
         let storage = state.storage.read().await;

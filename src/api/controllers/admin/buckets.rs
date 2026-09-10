@@ -2,8 +2,11 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::Json;
+use uuid::Uuid;
 use crate::error::{AppError, AppResult};
-use crate::db::repos::{BucketRepository, StorageObjectRepository, UserFileRepository};
+use crate::db::repos::{
+    BucketRepository, FileRepository, StorageObjectRepository, UserFileRepository, UserRepository,
+};
 use crate::storage::local::LocalFsBackend;
 use crate::utils::traits::StorageBackend;
 use crate::utils::names::validate_component_name;
@@ -154,6 +157,76 @@ pub async fn delete_bucket(
     Json(body): Json<DeleteBucketRequest>,
 ) -> AppResult<Json<MessageResponse>> {
     auth.require_admin()?;
+
+    // Resolve the bucket so we know its storage path for the physical cleanup.
+    let bucket = BucketRepository::find_by_name(state.db.pool(), &body.name)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("bucket '{}' not found", body.name)))?;
+
+    // ── 1. User file links: release each active link's quota charge, drop its
+    // ref_count reference, then hard-delete every row of this bucket (active
+    // links and soft-deleted tombstones alike). Soft-deleted rows already had
+    // their quota and ref_count released at tombstone time, so only active
+    // links are accounted for here.
+    let links = UserFileRepository::list_by_bucket_for_export(state.db.pool(), &body.name).await?;
+    let mut released_bytes: i64 = 0;
+    for link in &links {
+        let user_id = Uuid::parse_str(&link.user_id).unwrap_or_default();
+        let file_id = Uuid::parse_str(&link.file_id).unwrap_or_default();
+        let _ = UserRepository::release_storage(state.db.pool(), user_id, link.size).await;
+        let _ = FileRepository::update_ref_count(state.db.pool(), file_id, -1).await;
+        released_bytes += link.size;
+    }
+    sqlx::query("DELETE FROM user_files WHERE bucket_name = $1")
+        .bind(&body.name)
+        .execute(state.db.pool())
+        .await
+        .map_err(|e| AppError::Internal(format!(
+            "failed to delete user_files of bucket '{}': {e}",
+            body.name
+        )))?;
+
+    // ── 2. Folders: hard-delete every folder row of this bucket. ──
+    let folders = sqlx::query("DELETE FROM user_folders WHERE bucket_name = $1")
+        .bind(&body.name)
+        .execute(state.db.pool())
+        .await
+        .map_err(|e| AppError::Internal(format!(
+            "failed to delete user_folders of bucket '{}': {e}",
+            body.name
+        )))?
+        .rows_affected();
+
+    // ── 3. Physical storage: delete this bucket's storage objects and the
+    // files behind them on disk. Objects of OTHER buckets for the same content
+    // are untouched; `files` rows are left to the GC, which removes them (and
+    // any remaining copies) once no link references them anymore.
+    let objects = StorageObjectRepository::list_by_backend(state.db.pool(), &body.name).await?;
+    let backend = {
+        let storage = state.storage.read().await;
+        storage.get(&body.name)
+    };
+    let mut physical_errors = Vec::new();
+    for obj in &objects {
+        if let Some(ref be) = backend {
+            match be.delete(&obj.storage_path).await {
+                Ok(_) => {}
+                Err(e) => {
+                    physical_errors.push(format!("'{}': {e}", obj.storage_path));
+                }
+            }
+        }
+        if let Err(e) = StorageObjectRepository::delete(state.db.pool(), obj.id).await {
+            physical_errors.push(format!("storage object '{}': {e}", obj.id));
+        }
+    }
+    // Remove the bucket's storage directory if it is now empty. Only empty
+    // directories are ever removed, so content that does not belong to this
+    // bucket (e.g. a shared path root) is never touched.
+    cleanup_empty_dirs(&bucket.path);
+    let _ = std::fs::remove_dir(&bucket.path);
+
+    // ── 4. References + removal ──
     // Explicitly remove group_buckets references (bucket_name is not a FK, so no cascade)
     sqlx::query("DELETE FROM group_buckets WHERE bucket_id = (SELECT id FROM buckets WHERE name = $1)")
         .bind(&body.name)
@@ -162,8 +235,22 @@ pub async fn delete_bucket(
         .map_err(|e| AppError::Internal(format!("failed to clean group_buckets: {e}")))?;
     BucketRepository::delete(state.db.pool(), &body.name).await?;
     state.storage.write().await.remove(&body.name);
-    info!("admin {} deleted bucket '{}'", auth.username, body.name);
-    Ok(Json(MessageResponse { message: format!("bucket '{}' deleted", body.name) }))
+
+    let mut summary = format!(
+        "deleted bucket '{}': {} links ({released_bytes} bytes released), {folders} folders, {} storage objects",
+        body.name,
+        links.len(),
+        objects.len()
+    );
+    if !physical_errors.is_empty() {
+        summary.push_str(&format!(
+            " — physical cleanup had {} error(s): {}",
+            physical_errors.len(),
+            physical_errors.join("; ")
+        ));
+    }
+    info!("admin {} {}", auth.username, summary);
+    Ok(Json(MessageResponse { message: summary }))
 }
 
 pub async fn list_storage_backends(

@@ -286,6 +286,31 @@ impl UserFileRepository {
         Ok(row.map(UserFile::from))
     }
 
+    /// Find an ACTIVE (non-deleted) user_file by user_id + file_id +
+    /// original_name restricted to a specific bucket. Imports use this so a
+    /// backup restored into a different bucket creates its own link there even
+    /// when the user already has the same file+name in another bucket.
+    pub async fn find_active_in_bucket_by_user_file_and_name(
+        pool: &PgPool,
+        user_id: Uuid,
+        file_id: Uuid,
+        original_name: &str,
+        bucket_name: &str,
+    ) -> AppResult<Option<UserFile>> {
+        let row = sqlx::query_as::<_, UserFileRow>(
+            "SELECT * FROM user_files WHERE user_id = $1 AND file_id = $2 AND original_name = $3 AND bucket_name = $4 AND deleted_at IS NULL LIMIT 1",
+        )
+        .bind(user_id.to_string())
+        .bind(file_id.to_string())
+        .bind(original_name)
+        .bind(bucket_name)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to query user_file: {e}")))?;
+
+        Ok(row.map(UserFile::from))
+    }
+
     /// Restore a soft-deleted user_file (set deleted_at back to NULL).
     pub async fn restore(pool: &PgPool, id: Uuid) -> AppResult<bool> {
         let affected = sqlx::query("UPDATE user_files SET deleted_at = NULL WHERE id = $1 AND deleted_at IS NOT NULL")

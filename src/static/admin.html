@@ -1312,7 +1312,7 @@
                                         </div>
                                         <div class="flex-1 min-w-0">
                                             <h4 class="text-sm font-semibold text-gray-900">Indexer</h4>
-                                            <p class="text-xs text-gray-500 mt-0.5">Export all file &amp; folder metadata as a structured JSON document.</p>
+                                            <p class="text-xs text-gray-500 mt-0.5">Export the folder structure of each user and the hash of every file as a structured JSON document.</p>
                                             <div class="mt-3">
                                                 <button x-on:click="exportBucketIndex(exportBucketName); showExportModal = false;"
                                                     class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 transition">
@@ -1332,7 +1332,7 @@
                                         </div>
                                         <div class="flex-1 min-w-0">
                                             <h4 class="text-sm font-semibold text-gray-900">ZIP File</h4>
-                                            <p class="text-xs text-gray-500 mt-0.5">Download all files organised as <span class="font-mono text-gray-600">bucket/username/folder/...</span>.</p>
+                                            <p class="text-xs text-gray-500 mt-0.5">Download the raw bucket storage folder as-is (e.g. <span class="font-mono text-gray-600">p1/b1/...</span>) — every file exactly as stored on disk, named by its blake3 hash. Unzip it at a storage root to restore the folder verbatim. Use the Indexer JSON for the per-user structure with file hashes.</p>
                                             <div class="mt-3">
                                                 <button x-on:click="exportBucketZip(exportBucketName); showExportModal = false;"
                                                     class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-amber-600 hover:bg-amber-700 transition">
@@ -1368,7 +1368,7 @@
                                 <!-- Combined Import: ZIP + JSON -->
                                 <div class="space-y-4">
                                     <p class="text-xs text-gray-500">
-                                        Upload the exported files (<span class="font-mono text-gray-600">.zip</span>) and the indexer JSON (<span class="font-mono text-gray-600">.json</span>) together. The ZIP should contain all files organised as <span class="font-mono text-gray-600">bucket_name/username/path/to/file.ext</span> (same as the export format). The JSON index defines the folder structure and user-file associations.
+                                        Upload the exported files (<span class="font-mono text-gray-600">.zip</span>) and the indexer JSON (<span class="font-mono text-gray-600">.json</span>) together. The ZIP can be the raw storage-tree backup from the export, or files organised as <span class="font-mono text-gray-600">username/path/to/file.ext</span>. Files are stored by content hash and each bucket keeps its <b>own physical copy</b>, so a restored bucket never depends on another bucket's storage. The JSON index restores the folder structure and file associations. Backups can be restored into any bucket, regardless of the bucket name or path.
                                     </p>
                                     <div>
                                         <label class="block text-xs font-medium text-gray-700 mb-1">ZIP file <span class="text-gray-400">(file data)</span></label>
