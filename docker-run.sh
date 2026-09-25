@@ -21,6 +21,7 @@
 #   ./docker-run.sh status     show container status
 #   ./docker-run.sh stop       stop the server (data kept)
 #   ./docker-run.sh down       stop and remove the container (data kept)
+#   ./docker-run.sh watch-updates  enable the admin "Update & Restart" button
 #   ./docker-run.sh rebuild    force a full rebuild (no cache) and restart
 #   ./docker-run.sh reset      remove container AND volumes (DESTROYS DATA)
 #   ./docker-run.sh db-reset   delete ALL database data, re-run migrations (fresh schema)
@@ -43,12 +44,17 @@ docker-run.sh - build, run and update Keystone in Docker.
   Re-run    : rebuilds the image if sources changed (Docker layer cache),
               then recreates the container. Data persists in Docker volumes.
 
+  Updates    : run `./docker-run.sh watch-updates` (once, in the background) to
+               let the admin panel's "Update & Restart" button pull and rebuild
+               for you. Without it you still update by re-running this script.
+
 Usage:
   ./docker-run.sh            run or update the server (default)
   ./docker-run.sh logs       follow container logs
   ./docker-run.sh status     show container status
   ./docker-run.sh stop       stop the server (data kept)
   ./docker-run.sh down       stop and remove the container (data kept)
+  ./docker-run.sh watch-updates  power the admin "Update & Restart" button
   ./docker-run.sh rebuild    force a full rebuild (no cache) and restart
   ./docker-run.sh reset      remove container AND volumes (DESTROYS DATA)
   ./docker-run.sh db-reset   delete ALL database data, re-run migrations (fresh schema)
@@ -96,11 +102,25 @@ if [[ -n "${DATA_HOST_PATH:-}" && "${DATA_HOST_PATH:0:1}" != "/" ]]; then
 fi
 
 # Same for SERVER_PORT: the published host port (default 3000). .env is only
-# read by compose, so read it here to print the real URL after starting.
+# read by compose, so load the value here first.
 if [[ -z "${SERVER_PORT:-}" && -f .env ]]; then
   SERVER_PORT="$(sed -n 's/^SERVER_PORT=//p' .env | tail -n1)"
 fi
 SERVER_PORT="${SERVER_PORT:-3000}"
+
+# UPDATE_REQUEST_DIR is the host folder the server writes "update requested"
+# markers into; docker/auto-update.sh watches it and runs `git pull &&
+# ./docker-run.sh`. Anchor a relative value to the project root and make sure
+# the folder exists, otherwise Docker would create it root-owned.
+if [[ -z "${UPDATE_REQUEST_DIR:-}" && -f .env ]]; then
+  UPDATE_REQUEST_DIR="$(sed -n 's/^UPDATE_REQUEST_DIR=//p' .env | tail -n1 | tr -d '"'"'"' \r')"
+fi
+UPDATE_REQUEST_DIR="${UPDATE_REQUEST_DIR:-./update-requests}"
+if [[ "${UPDATE_REQUEST_DIR:0:1}" != "/" ]]; then
+  UPDATE_REQUEST_DIR="$(pwd)/${UPDATE_REQUEST_DIR}"
+fi
+mkdir -p "$UPDATE_REQUEST_DIR"
+export UPDATE_REQUEST_DIR
 
 # --- first-run setup -------------------------------------------------------
 if [ ! -f .env ]; then
@@ -132,6 +152,7 @@ cmd_up() {
   echo "============================================"
   echo "  Keystone is running: http://localhost:$SERVER_PORT"
   echo "  Run ./docker-run.sh again to update it."
+  echo "  Admin one-click updates: ./docker-run.sh watch-updates"
   echo "  Logs: ./docker-run.sh logs"
   echo "============================================"
 }
@@ -140,6 +161,12 @@ cmd_logs()   { compose logs -f; }
 cmd_status() { compose ps; }
 cmd_stop()   { compose stop; }
 cmd_down()   { compose down; }
+
+cmd_watch_updates() {
+  # Host-side helper for the admin "Update & Restart" button. Runs in the
+  # foreground; use `nohup ./docker-run.sh watch-updates &` to background it.
+  exec ./docker/auto-update.sh
+}
 
 cmd_rebuild() {
   echo ">> full rebuild (no cache) - this can take a while..."
@@ -228,8 +255,9 @@ case "${1:-run}" in
   run|start|up|update) cmd_up ;;
   logs)                cmd_logs ;;
   status|ps)           cmd_status ;;
-  stop)                cmd_stop ;;
-  down)                cmd_down ;;
+  stop)               cmd_stop ;;
+  down)               cmd_down ;;
+  watch-updates)      cmd_watch_updates ;;
   rebuild)             cmd_rebuild ;;
   reset)               cmd_reset ;;
   db-reset|reset-db)   cmd_db_reset ;;

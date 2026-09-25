@@ -356,9 +356,21 @@ pub struct UpdateCheckDto {
     pub latest: Option<UpdateReleaseDto>,
     /// True when `latest` is set and newer than `current_version`.
     pub update_available: bool,
+    /// True when the server has a working way to pull and restart itself, so
+    /// the panel can offer a one-click "Update & Restart" button instead of
+    /// only linking to the release page. False when the operator has not set up
+    /// a host watcher (request folder) or an apply hook.
+    pub can_apply: bool,
     /// Human-readable error when the check failed (e.g. GitHub unreachable).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Result of requesting an update/restart through the configured mechanism.
+#[derive(Debug, Serialize)]
+pub struct UpdateApplyDto {
+    pub started: bool,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize)]

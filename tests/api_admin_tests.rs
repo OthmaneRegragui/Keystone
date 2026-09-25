@@ -165,6 +165,25 @@ async fn test_admin_update_check_returns_current_version() {
     assert!(json.get("error").is_some() || json.get("latest").is_some());
 }
 
+#[tokio::test]
+async fn test_admin_update_apply_requires_admin() {
+    let (app, token, _state, _temp) = setup_user().await;
+    let resp = helpers::json_post_auth(&app, "/api/admin/update-apply", &serde_json::json!({}), &token).await;
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn test_admin_update_apply_rejects_when_no_mechanism_configured() {
+    let (app, token, _state, _temp) = setup_admin().await;
+    let resp = helpers::json_post_auth(&app, "/api/admin/update-apply", &serde_json::json!({}), &token).await;
+    assert_eq!(resp.status(), 400);
+    let json = helpers::response_json(resp).await;
+    assert!(json["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("no update mechanism"));
+}
+
 // ─── Admin Bucket Management ─────────────────────────────────────────────
 
 #[tokio::test]

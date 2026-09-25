@@ -102,6 +102,32 @@ impl Default for AuthConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateConfig {
+    /// GitHub owner/repo used by the update check.
+    pub repo: String,
+    /// Absolute path to an executable that pulls the new code and rebuilds /
+    /// restarts the container (e.g. a wrapper around `docker-run.sh`). When set
+    /// and executable, the admin panel offers a button that runs it instead of
+    /// only showing the release page. Empty disables the button.
+    pub apply_hook: String,
+    /// Directory (inside the container) where the admin "Update & Restart"
+    /// button drops a marker file. A host-side helper watches this folder and
+    /// runs `docker-run.sh`. This is the Docker-safe path: the server never
+    /// touches Docker. Empty disables it.
+    pub apply_request_path: String,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            repo: "OthmaneRegragui/Keystone".to_string(),
+            apply_hook: String::new(),
+            apply_request_path: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
     pub backend: String,
     /// Comma-separated list of directories where files are stored.
@@ -227,6 +253,7 @@ pub struct Settings {
     pub database: DatabaseConfig,
     pub auth: AuthConfig,
     pub storage: StorageConfig,
+    pub update: UpdateConfig,
     pub worker: WorkerConfig,
     pub rate_limit: RateLimitConfig,
     pub cors: CorsConfig,
@@ -268,6 +295,11 @@ impl Settings {
                 "backend": "local",
                 "local_paths": ["./storage"],
                 "max_upload_size_mb": 100
+            },
+            "update": {
+                "repo": "OthmaneRegragui/Keystone",
+                "apply_hook": "",
+                "apply_request_path": ""
             },
             "worker": {
                 "queue_size": 1000,
@@ -333,6 +365,27 @@ impl Settings {
                 if !raw.trim().is_empty() {
                     settings.auth.jwt_secret = raw.trim().to_string();
                 }
+            }
+        }
+
+        // UPDATE_REPO / UPDATE_APPLY_HOOK: plain env vars mirroring the older
+        // KEYSTONE_UPDATE_REPO knob and the new apply hook (documented in
+        // .env.example). KEYSTONE__UPDATE__* still wins when set explicitly.
+        if std::env::var_os("KEYSTONE__UPDATE__REPO").is_none() {
+            if let Ok(raw) = std::env::var("UPDATE_REPO") {
+                if !raw.trim().is_empty() {
+                    settings.update.repo = raw.trim().to_string();
+                }
+            }
+        }
+        if std::env::var_os("KEYSTONE__UPDATE__APPLY_HOOK").is_none() {
+            if let Ok(raw) = std::env::var("UPDATE_APPLY_HOOK") {
+                settings.update.apply_hook = raw.trim().to_string();
+            }
+        }
+        if std::env::var_os("KEYSTONE__UPDATE__APPLY_REQUEST_PATH").is_none() {
+            if let Ok(raw) = std::env::var("UPDATE_APPLY_REQUEST_PATH") {
+                settings.update.apply_request_path = raw.trim().to_string();
             }
         }
 

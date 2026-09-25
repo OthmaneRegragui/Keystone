@@ -572,9 +572,58 @@ Requests and responses are identical to the corresponding `/api/*` endpoints abo
 | GET | `/api/admin/stats` | `{ total_users, total_files, total_buckets, total_groups, block_registrations, active_user_files, active_user_files_size, deleted_user_files, deleted_user_files_size, orphaned_physical_files, orphaned_physical_files_size }` |
 | GET | `/api/admin/settings` | `{ block_registrations, allow_user_api_keys, allow_user_bots, allow_user_password_change, allow_user_sharing }` |
 | PUT | `/api/admin/settings` | Update setting: `{ "key": "allow_user_api_keys", "value": "true" }` — keys: `block_registrations`, `allow_user_api_keys`, `allow_user_bots`, `allow_user_password_change`, `allow_user_sharing` (`"true"`/`"false"`) |
-| GET | `/api/admin/update-check` | Check for a newer release: `{ "current_version", "latest"?, "update_available", "error"? }` — queries the project's GitHub releases API server-side and reports whether a newer version exists |
+| GET | `/api/admin/update-check` | Check for a newer release: `{ "current_version", "latest"?, "update_available", "can_apply", "error"? }` — queries the project's GitHub releases API server-side and reports whether a newer version exists. `can_apply` is `true` when a one-click update mechanism is configured on the server |
+| POST | `/api/admin/update-apply` | Request a one-click update/restart: `{ "started", "message" }`. Admin-only. Returns `400` when no update mechanism is configured. The server only writes a marker file (or execs a configured hook) — it never touches Docker itself |
 
-The admin panel has a dedicated **Updates** tab showing the running version and a **Check for Updates** button that calls this endpoint (server-side, so no CORS/rate-limit concerns for admins). If the GitHub release is newer than the running version, an **Update button** links to the release page. The source repo defaults to `OthmaneRegragui/Keystone` and can be overridden with the `KEYSTONE_UPDATE_REPO` env var (`owner/repo`). The check fails soft: when the repository has no releases or version tags it simply reports that no update is available, and only an unreachable or rate-limited GitHub is surfaced as an `error` string rather than a failed request.
+The admin panel has a dedicated **Updates** tab showing the running version and a **Check for Updates** button that calls this endpoint (server-side, so no CORS/rate-limit concerns for admins). The check falls back to version tags when the repo has no published releases, and fails soft: no releases/tags is reported as "no update available" rather than an error, and only an unreachable or rate-limited GitHub is surfaced as an `error` string.
+
+When a newer version exists you get one of two buttons:
+
+- **Update & Restart** (one-click) — shown only when a mechanism is configured. Confirms, asks the server to start the update, then shows "reload this page in about a minute".
+- **Update to vX.Y.Z** (manual) — shown when no mechanism is configured; just links to the release page.
+
+**Why the server can't do it alone:** Keystone runs unprivileged inside Docker and has no access to your host's `git` or the Docker daemon. Mounting the Docker socket into the container would hand the server root-equivalent control of your machine, so Keystone deliberately does not do that. Instead the server drops a marker file into a folder that *is* shared with the host, and a small host-side script does the privileged part.
+
+#### One-click updates (host watcher)
+
+1. `.env` already sets `UPDATE_REQUEST_DIR=./update-requests`. `docker-run.sh` creates that folder and bind-mounts it into the container at `/mnt/keystone/update-requests`. Change the host path if you want it elsewhere.
+2. Start the watcher once, in the background:
+
+   ```bash
+   nohup ./docker-run.sh watch-updates > /dev/null 2>&1 &
+   ```
+
+3. That's it. When an admin clicks **Update & Restart**, the server writes `restart-<timestamp>.request` into the folder, and the watcher runs `git pull --ff-only && ./docker-run.sh` — a fast-forward pull only, so it will refuse rather than clobber local changes, and a failed pull skips the rebuild.
+
+The watcher does nothing until an admin requests an update, processes each marker once, and can be stopped with `pkill -f docker/auto-update.sh`. Without it you still update by running `./docker-run.sh` yourself.
+
+The watcher is a plain background process, so it stops when the machine reboots. To make it permanent, run it as a systemd service that starts after Docker:
+
+```ini
+# /etc/systemd/system/keystone-auto-update.service
+[Unit]
+Description=Keystone one-click update watcher
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/Keystone
+ExecStart=/path/to/Keystone/docker/auto-update.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now keystone-auto-update
+```
+
+**Other installs (systemd, VM, direct binary):** set `UPDATE_APPLY_HOOK` to the absolute path of an executable that pulls and restarts the server. The admin button runs that hook directly instead of writing a marker file.
+
+The source repo defaults to `OthmaneRegragui/Keystone` and can be overridden with the `UPDATE_REPO` env var (`owner/repo`).
 
 #### Buckets
 | Method | Path | Purpose |

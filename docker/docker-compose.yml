@@ -51,6 +51,11 @@ services:
       # (mapped to 5432 below). For an external DB on a non-5432 port, set
       # KEYSTONE__DATABASE__URL explicitly.
       - POSTGRES_PORT=5432
+      # Admin "Update & Restart" button: the server drops a marker file in this
+      # folder and the host-side docker/auto-update.sh watcher runs
+      # `git pull && ./docker-run.sh`. This is the Docker-safe path — the
+      # server never touches the Docker daemon or the host repo itself.
+      - UPDATE_APPLY_REQUEST_PATH=/mnt/keystone/update-requests
     volumes:
       # Where files live OUTSIDE the container is set with DATA_HOST_PATH in .env
       # (only the mount source changes — the server always sees STORAGE_LOCAL_PATHS):
@@ -63,6 +68,10 @@ services:
       # To switch a running install, copy the old data into the new location once
       # (see README "Storage"), then set DATA_HOST_PATH and restart.
       - ${DATA_HOST_PATH:-storagedata}:${STORAGE_LOCAL_PATHS:-/mnt/keystone/data}
+      # Host folder the auto-update watcher watches; the server writes the
+      # "update requested" marker here. Relative paths are anchored to the
+      # project root by docker-run.sh, like DATA_HOST_PATH.
+      - ${UPDATE_REQUEST_DIR:-./update-requests}:/mnt/keystone/update-requests
 
   # Optional "create one" Postgres: only started when the `db` profile is
   # enabled (docker-run.sh does that automatically when POSTGRES_HOST is unset

@@ -111,6 +111,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
                     .route("/settings", axum::routing::get(crate::api::controllers::admin::get_settings))
                     .route("/settings", axum::routing::put(crate::api::controllers::admin::update_setting))
                     .route("/update-check", axum::routing::get(crate::api::controllers::admin::check_update))
+                    .route("/update-apply", axum::routing::post(crate::api::controllers::admin::apply_update))
                     .route("/backends", axum::routing::get(crate::api::controllers::admin::list_storage_backends))
                     .route("/buckets", axum::routing::get(crate::api::controllers::admin::list_buckets))
                     .route("/buckets", axum::routing::post(crate::api::controllers::admin::create_bucket))

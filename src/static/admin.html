@@ -146,7 +146,7 @@
                 botsLoading: false,
                 settings: { block_registrations: true, allow_user_api_keys: false, allow_user_bots: false, allow_user_password_change: false },
                 currentVersion: '__KEYSTONE_VERSION__',
-                update: { checking: false, checked: false, loaded: false, available: false, latest: null, error: '' },
+                update: { checking: false, checked: false, loaded: false, available: false, canApply: false, applying: false, applied: false, latest: null, error: '' },
                 users: [],
                 buckets: [],
                 backends: [],
@@ -265,6 +265,7 @@
                     self.update.checking = true;
                     self.update.checked = true;
                     self.update.error = '';
+                    self.update.canApply = false;
                     authFetch('/api/admin/update-check')
                         .then(function(r) {
                             if (!r.ok) return r.json().then(function(e) { throw new Error(e.detail || e.error || 'Update check failed'); });
@@ -285,7 +286,8 @@
                                 url: data.latest ? data.latest.url : ''
                             };
                             self.update.available = !!data.update_available;
-                            self.update.currentVersion = data.current_version || self.currentVersion;
+                            self.update.canApply = !!data.can_apply;
+                            self.currentVersion = data.current_version || self.currentVersion;
                             self.update.loaded = true;
                             self.update.checking = false;
                         })
@@ -294,12 +296,33 @@
                             self.update.loaded = false;
                             self.update.latest = null;
                             self.update.available = false;
+                            self.update.canApply = false;
                             self.update.checking = false;
                         });
                 },
                 get isUpdateAvailable() {
                     var self = this;
                     return self.update.loaded && self.update.available;
+                },
+                applyUpdate: function() {
+                    var self = this;
+                    if (self.update.applying || self.update.applied) return;
+                    if (!confirm('Pull the new version and restart Keystone now? The server will be briefly unavailable.')) return;
+                    self.update.applying = true;
+                    self.update.error = '';
+                    authFetch('/api/admin/update-apply', { method: 'POST' })
+                        .then(function(r) {
+                            if (!r.ok) return r.json().then(function(e) { throw new Error(e.detail || e.error || 'Update failed'); });
+                            return r.json();
+                        })
+                        .then(function() {
+                            self.update.applied = true;
+                            self.update.applying = false;
+                        })
+                        .catch(function(e) {
+                            self.update.error = e.message || 'Failed to start the update';
+                            self.update.applying = false;
+                        });
                 },
                 loadUsers: function() {
                     var self = this;
@@ -2053,7 +2076,14 @@
                                     <span x-text="update.checking ? 'Checking...' : 'Check for Updates'"></span>
                                 </button>
 
-                                <template x-if="update.loaded && isUpdateAvailable">
+                                <template x-if="update.loaded && isUpdateAvailable && update.canApply && !update.applied">
+                                    <button x-on:click="applyUpdate()" :disabled="update.applying" class="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition">
+                                        <svg x-show="update.applying" class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                                        <svg x-show="!update.applying" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                                        <span x-text="update.applying ? 'Starting update...' : 'Update & Restart'"></span>
+                                    </button>
+                                </template>
+                                <template x-if="update.loaded && isUpdateAvailable && !update.canApply && !update.applied">
                                     <a :href="update.latest.url" target="_blank" rel="noopener" class="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition">
                                         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
                                         Update to v<span x-text="update.latest.tag.replace(/^v/, '')"></span>
@@ -2062,18 +2092,23 @@
                             </div>
 
                             <div class="mt-4 text-sm" x-show="update.loaded">
-                                <template x-if="isUpdateAvailable">
+                                <template x-if="update.applied">
+                                    <p class="text-blue-700 bg-blue-50 border border-blue-200 rounded-lg px-4 py-3">
+                                        Update started. Keystone will restart in a moment — reload this page in about a minute.
+                                    </p>
+                                </template>
+                                <template x-if="isUpdateAvailable && !update.applied">
                                     <p class="text-green-700 bg-green-50 border border-green-200 rounded-lg px-4 py-3">
                                         A new version <strong>v<span x-text="update.latest.tag"></span></strong> is available.
                                         <template x-if="update.latest.name"><span class="text-green-600 block">"<span x-text="update.latest.name"></span>"</span></template>
                                     </p>
                                 </template>
-                                <template x-if="!isUpdateAvailable && !update.latest.tag">
+                                <template x-if="!isUpdateAvailable && !update.latest.tag && !update.applied">
                                     <p class="text-gray-700 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3">
                                         No update available for now. We'll let you know when a new version is released.
                                     </p>
                                 </template>
-                                <template x-if="!isUpdateAvailable && update.latest.tag">
+                                <template x-if="!isUpdateAvailable && update.latest.tag && !update.applied">
                                     <p class="text-green-700 bg-green-50 border border-green-200 rounded-lg px-4 py-3">
                                         You are running the latest version (<strong>v<span x-text="currentVersion"></span></strong>).
                                     </p>

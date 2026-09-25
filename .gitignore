@@ -5,3 +5,7 @@ data/
 *.db-shm
 .env
 !Cargo.lock
+
+# Host folder the admin "Update & Restart" button writes marker files into
+# (see UPDATE_REQUEST_DIR in .env.example and docker/auto-update.sh).
+/update-requests/

@@ -10,12 +10,6 @@ use crate::dto::*;
 use crate::api::extractors::AuthUser;
 use crate::AppState;
 
-/// GitHub owner/repo the update check queries for the latest release. Override
-/// with the `KEYSTONE_UPDATE_REPO` env var (format `owner/repo`).
-fn update_repo() -> String {
-    std::env::var("KEYSTONE_UPDATE_REPO").unwrap_or_else(|_| "OthmaneRegragui/Keystone".to_string())
-}
-
 /// The version of the currently running server binary.
 pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -120,6 +114,19 @@ async fn fetch_latest_tag(
     }))
 }
 
+fn hook_is_usable(hook: &str) -> bool {
+    std::path::Path::new(hook).is_file()
+}
+
+/// True when a restart/update can be triggered from the admin panel: either a
+/// host watcher is watching a request folder, or a direct hook is configured.
+fn can_apply(config: &crate::config::UpdateConfig) -> bool {
+    let request_dir = config.apply_request_path.trim();
+    let hook = config.apply_hook.trim();
+    (!request_dir.is_empty() && std::path::Path::new(request_dir).is_dir())
+        || (!hook.is_empty() && hook_is_usable(hook))
+}
+
 /// Response shown when the repository has no published releases or version
 /// tags to compare against. This is a normal state for a young project, not an
 /// error the admin needs to act on.
@@ -128,11 +135,12 @@ fn no_update_available_response() -> Json<UpdateCheckDto> {
         current_version: current_version().to_string(),
         latest: None,
         update_available: false,
+        can_apply: false,
         error: None,
     })
 }
 
-fn update_response(release: GithubRelease, repo: &str) -> Json<UpdateCheckDto> {
+fn update_response(release: GithubRelease, repo: &str, can_apply: bool) -> Json<UpdateCheckDto> {
     let tag = release.tag_name.unwrap_or_default();
     let latest = UpdateReleaseDto {
         tag: tag.clone(),
@@ -148,6 +156,7 @@ fn update_response(release: GithubRelease, repo: &str) -> Json<UpdateCheckDto> {
         current_version: current_version().to_string(),
         latest: Some(latest),
         update_available,
+        can_apply,
         error: None,
     })
 }
@@ -158,12 +167,20 @@ fn update_response(release: GithubRelease, repo: &str) -> Json<UpdateCheckDto> {
 /// instead of a 500. A repository with no releases or version tags is treated
 /// as simply having no update available.
 pub async fn check_update(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     auth: AuthUser,
 ) -> AppResult<Json<UpdateCheckDto>> {
     auth.require_admin()?;
 
-    let repo = update_repo();
+    // `update.repo` is `owner/repo`; fall back to the upstream project when an
+    // operator leaves it blank.
+    let repo = state.config.update.repo.trim();
+    let repo = if repo.is_empty() {
+        "OthmaneRegragui/Keystone"
+    } else {
+        repo
+    };
+    let can_apply = can_apply(&state.config.update);
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
 
     let client = reqwest::Client::builder()
@@ -179,6 +196,7 @@ pub async fn check_update(
                 current_version: current_version().to_string(),
                 latest: None,
                 update_available: false,
+                can_apply: false,
                 error: Some(format!("update check failed: {e}")),
             }));
         }
@@ -188,12 +206,13 @@ pub async fn check_update(
     if status == reqwest::StatusCode::NOT_FOUND {
         // No formal GitHub releases — fall back to version tags.
         return match fetch_latest_tag(&client, &repo).await {
-            Ok(Some(release)) => Ok(update_response(release, &repo)),
+            Ok(Some(release)) => Ok(update_response(release, &repo, can_apply)),
             Ok(None) => Ok(no_update_available_response()),
             Err(e) => Ok(Json(UpdateCheckDto {
                 current_version: current_version().to_string(),
                 latest: None,
                 update_available: false,
+                can_apply: false,
                 error: Some(e),
             })),
         };
@@ -203,6 +222,7 @@ pub async fn check_update(
             current_version: current_version().to_string(),
             latest: None,
             update_available: false,
+            can_apply: false,
             error: Some("update check rate limited by GitHub — try again later".to_string()),
         }));
     }
@@ -211,6 +231,7 @@ pub async fn check_update(
             current_version: current_version().to_string(),
             latest: None,
             update_available: false,
+            can_apply: false,
             error: Some(format!("update check failed with status {status}")),
         }));
     }
@@ -222,12 +243,69 @@ pub async fn check_update(
                 current_version: current_version().to_string(),
                 latest: None,
                 update_available: false,
+                can_apply: false,
                 error: Some(format!("failed to parse release info: {e}")),
             }));
         }
     };
 
-    Ok(update_response(release, &repo))
+    Ok(update_response(release, &repo, can_apply))
+}
+
+/// Trigger the update: either drop a request file for the host-side watcher
+/// (the Docker-safe path) or run a directly-configured hook. This is the button
+/// the admin panel shows when an update is available and one of these is set.
+///
+/// Safety: requires a logged-in admin, and the server never touches Docker
+/// itself — the request file / hook is executed by the operator's host.
+pub async fn apply_update(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+) -> AppResult<Json<UpdateApplyDto>> {
+    auth.require_admin()?;
+
+    // Preferred (Docker): hand off to the host-side watcher via a marker file.
+    let request_dir = state.config.update.apply_request_path.trim().to_string();
+    if !request_dir.is_empty() {
+        let dir_path = std::path::Path::new(&request_dir);
+        if !dir_path.is_dir() {
+            return Err(AppError::Internal(format!(
+                "update request folder is not a directory: {request_dir}"
+            )));
+        }
+        let request = dir_path.join(format!(
+            "restart-{}.request",
+            chrono::Utc::now().timestamp_millis()
+        ));
+        std::fs::write(&request, current_version().as_bytes())
+            .map_err(|e| AppError::Internal(format!("failed to write update request: {e}")))?;
+        return Ok(Json(UpdateApplyDto {
+            started: true,
+            message: "Update requested. Keystone will rebuild and restart in a moment.".into(),
+        }));
+    }
+
+    // Fallback (server can exec the host directly, e.g. systemd/VM deploys).
+    let hook = state.config.update.apply_hook.trim().to_string();
+    if !hook.is_empty() {
+        if !hook_is_usable(&hook) {
+            return Err(AppError::Internal(format!(
+                "update hook is not an executable file: {hook}"
+            )));
+        }
+        tokio::process::Command::new(&hook)
+            .spawn()
+            .map_err(|e| AppError::Internal(format!("failed to start update hook: {e}")))?;
+        return Ok(Json(UpdateApplyDto {
+            started: true,
+            message: "Update started. Keystone will restart in a moment.".into(),
+        }));
+    }
+
+    Err(AppError::BadRequest(
+        "no update mechanism is configured (set UPDATE_APPLY_REQUEST_PATH or UPDATE_APPLY_HOOK)"
+            .into(),
+    ))
 }
 
 pub async fn get_settings(
@@ -280,7 +358,8 @@ pub async fn update_setting(
 
 #[cfg(test)]
 mod tests {
-    use super::{compare_versions, newest_version_tag, no_update_available_response};
+    use super::{can_apply, compare_versions, newest_version_tag, no_update_available_response};
+    use crate::config::UpdateConfig;
 
     #[test]
     fn no_release_or_tag_is_not_reported_as_an_error() {
@@ -289,6 +368,21 @@ mod tests {
         assert!(response.latest.is_none());
         assert!(!response.update_available);
         assert!(response.error.is_none());
+    }
+
+    #[test]
+    fn can_apply_is_false_without_a_configured_mechanism() {
+        let config = UpdateConfig::default();
+        assert!(!can_apply(&config));
+    }
+
+    #[test]
+    fn can_apply_is_true_when_the_request_folder_exists() {
+        let config = UpdateConfig {
+            apply_request_path: std::env::temp_dir().to_string_lossy().to_string(),
+            ..UpdateConfig::default()
+        };
+        assert!(can_apply(&config));
     }
 
     #[test]

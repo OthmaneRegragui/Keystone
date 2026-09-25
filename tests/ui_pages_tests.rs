@@ -716,6 +716,24 @@ fn test_sidebar_has_admin_only_system_stats() {
 }
 
 #[test]
+fn test_admin_page_has_one_click_update_button() {
+    let html = versioned(ADMIN_HTML);
+    // The apply action talks to the server, which then hands the work to the
+    // operator's host (request folder or hook) — never Docker directly.
+    assert!(html.contains("/api/admin/update-apply"));
+    assert!(html.contains("applyUpdate"));
+    assert!(html.contains("Update & Restart"));
+    // The button only shows when an update exists AND a mechanism is configured.
+    assert!(html.contains("isUpdateAvailable && update.canApply"));
+    // Manual fallback stays available for installs with no watcher/hook.
+    assert!(html.contains("!update.canApply"));
+    assert!(html.contains("update.latest.url"));
+    // Confirmation before triggering a restart, and a guard against re-clicks.
+    assert!(html.contains("confirm("));
+    assert!(html.contains("update.applying || self.update.applied"));
+}
+
+#[test]
 fn test_admin_page_references_api() {
     let html = versioned(ADMIN_HTML);
     assert!(
