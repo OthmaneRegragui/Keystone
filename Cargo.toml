@@ -79,6 +79,6 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
 unsafe_code = "forbid"
 
 [profile.release]
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
 strip = true

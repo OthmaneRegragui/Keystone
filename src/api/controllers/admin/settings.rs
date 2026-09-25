@@ -407,9 +407,30 @@ mod tests {
 
     #[test]
     fn newest_version_tag_detects_newer_than_running() {
-        // The scenario from the bug report: server is 0.7.0, only a tag exists.
-        let tags = ["v0.6.0", "v0.7.0"];
-        assert_eq!(newest_version_tag(tags.iter().copied()).unwrap(), "0.7.0");
-        assert_eq!(compare_versions("0.7.0", super::current_version()), 0);
+        // The scenario from the bug report: the repo has no releases, only
+        // version tags, and the newest tag is newer than the running server.
+        // Built from `current_version()` so this test does not need editing on
+        // every release bump (it used to hardcode "0.7.0" and broke at 0.8.0).
+        let current = super::current_version();
+        let older = current.rsplit_once('.').map(|(maj_min, _)| format!("{maj_min}.0"));
+        let mut tags = vec![older.clone().unwrap_or_else(|| "v0.0.1".into())];
+        tags.push(format!("v{current}"));
+        // A tag one patch ahead of the running version, e.g. 0.8.0 -> 0.8.1.
+        let newer = match current.rsplit_once('.') {
+            Some((maj_min, patch)) => {
+                let next: u64 = patch.parse().unwrap_or(0) + 1;
+                format!("v{maj_min}.{next}")
+            }
+            None => format!("v{current}-next"),
+        };
+        tags.push(newer.clone());
+
+        assert_eq!(
+            newest_version_tag(tags.iter().map(String::as_str)).unwrap(),
+            newer.trim_start_matches('v')
+        );
+        assert_eq!(compare_versions(&newer, current), 1);
+        // The running version itself must compare equal, not "newer".
+        assert_eq!(compare_versions(current, current), 0);
     }
 }

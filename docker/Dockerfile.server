@@ -12,10 +12,15 @@ ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
     CARGO_HTTP_MULTIPLEXING=false \
     CARGO_NET_RETRY=10
 
-# Cache dependencies: copy manifests first, create a dummy lib to build deps
+# Cache dependencies: copy manifests first, create a dummy lib to build deps.
+# The `target` dir is a BuildKit cache mount so compiled dependencies survive
+# even when the layer below is invalidated, which keeps rebuilds incremental.
+# Because a cache mount is not committed to the image, the final binary is
+# copied out to a normal path (/app/server) for the runtime stage to COPY.
 COPY Cargo.toml Cargo.lock ./
 RUN --mount=type=cache,id=keystone-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=keystone-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=keystone-cargo-target,target=/app/target,sharing=locked \
     mkdir src && \
     echo '' > src/lib.rs && \
     echo 'fn main() {}' > src/main.rs && \
@@ -27,7 +32,10 @@ COPY src/ src/
 COPY migrations/ migrations/
 RUN --mount=type=cache,id=keystone-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=keystone-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    touch src/main.rs src/lib.rs && cargo build --release --locked --bin keystone
+    --mount=type=cache,id=keystone-cargo-target,target=/app/target,sharing=locked \
+    touch src/main.rs src/lib.rs && \
+    cargo build --release --locked --bin keystone && \
+    cp target/release/keystone /app/server
 
 # --- Runtime ---
 FROM debian:bookworm-slim
@@ -38,7 +46,7 @@ RUN useradd -m -s /bin/bash keystone
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/keystone /app/server
+COPY --from=builder /app/server /app/server
 
 # Prepare the storage mount point (the "storagedata" volume mounts here).
 # /mnt exists in the base image; /mnt/keystone is created for the volume.
