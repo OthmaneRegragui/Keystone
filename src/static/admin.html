@@ -2068,7 +2068,12 @@
                                         <template x-if="update.latest.name"><span class="text-green-600 block">"<span x-text="update.latest.name"></span>"</span></template>
                                     </p>
                                 </template>
-                                <template x-if="!isUpdateAvailable">
+                                <template x-if="!isUpdateAvailable && !update.latest.tag">
+                                    <p class="text-gray-700 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3">
+                                        No update available for now. We'll let you know when a new version is released.
+                                    </p>
+                                </template>
+                                <template x-if="!isUpdateAvailable && update.latest.tag">
                                     <p class="text-green-700 bg-green-50 border border-green-200 rounded-lg px-4 py-3">
                                         You are running the latest version (<strong>v<span x-text="currentVersion"></span></strong>).
                                     </p>

@@ -120,6 +120,18 @@ async fn fetch_latest_tag(
     }))
 }
 
+/// Response shown when the repository has no published releases or version
+/// tags to compare against. This is a normal state for a young project, not an
+/// error the admin needs to act on.
+fn no_update_available_response() -> Json<UpdateCheckDto> {
+    Json(UpdateCheckDto {
+        current_version: current_version().to_string(),
+        latest: None,
+        update_available: false,
+        error: None,
+    })
+}
+
 fn update_response(release: GithubRelease, repo: &str) -> Json<UpdateCheckDto> {
     let tag = release.tag_name.unwrap_or_default();
     let latest = UpdateReleaseDto {
@@ -142,9 +154,9 @@ fn update_response(release: GithubRelease, repo: &str) -> Json<UpdateCheckDto> {
 
 /// Check GitHub for a newer release than the running version.
 ///
-/// Fails soft: if GitHub is unreachable, rate-limited, or the repo has no
-/// release, we report an error message instead of returning a 500 — the admin
-/// still sees the current version.
+/// Fails soft: network and rate-limit problems are reported as an error message
+/// instead of a 500. A repository with no releases or version tags is treated
+/// as simply having no update available.
 pub async fn check_update(
     State(_state): State<Arc<AppState>>,
     auth: AuthUser,
@@ -177,15 +189,7 @@ pub async fn check_update(
         // No formal GitHub releases — fall back to version tags.
         return match fetch_latest_tag(&client, &repo).await {
             Ok(Some(release)) => Ok(update_response(release, &repo)),
-            Ok(None) => Ok(Json(UpdateCheckDto {
-                current_version: current_version().to_string(),
-                latest: None,
-                update_available: false,
-                error: Some(format!(
-                    "no releases or version tags found for {repo} — publish a GitHub release \
-                     (or push a tag like v0.7.0) so updates can be detected"
-                )),
-            })),
+            Ok(None) => Ok(no_update_available_response()),
             Err(e) => Ok(Json(UpdateCheckDto {
                 current_version: current_version().to_string(),
                 latest: None,
@@ -276,7 +280,16 @@ pub async fn update_setting(
 
 #[cfg(test)]
 mod tests {
-    use super::{compare_versions, newest_version_tag};
+    use super::{compare_versions, newest_version_tag, no_update_available_response};
+
+    #[test]
+    fn no_release_or_tag_is_not_reported_as_an_error() {
+        let response = no_update_available_response().0;
+        assert_eq!(response.current_version, super::current_version());
+        assert!(response.latest.is_none());
+        assert!(!response.update_available);
+        assert!(response.error.is_none());
+    }
 
     #[test]
     fn compare_versions_accepts_v_prefix() {
@@ -300,9 +313,9 @@ mod tests {
 
     #[test]
     fn newest_version_tag_detects_newer_than_running() {
-        // The scenario from the bug report: server is 0.6.0, only a tag exists.
-        let tags = ["v0.5.0", "v0.6.0"];
-        assert_eq!(newest_version_tag(tags.iter().copied()).unwrap(), "0.6.0");
-        assert_eq!(compare_versions("0.6.0", super::current_version()), 0);
+        // The scenario from the bug report: server is 0.7.0, only a tag exists.
+        let tags = ["v0.6.0", "v0.7.0"];
+        assert_eq!(newest_version_tag(tags.iter().copied()).unwrap(), "0.7.0");
+        assert_eq!(compare_versions("0.7.0", super::current_version()), 0);
     }
 }

@@ -722,6 +722,10 @@ fn test_admin_page_references_api() {
         html.contains("/api/admin"),
         "admin page should reference /api/admin"
     );
+    assert!(
+        html.contains("No update available for now"),
+        "admin page should show a friendly no-update message"
+    );
 }
 
 #[test]
