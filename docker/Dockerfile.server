@@ -4,18 +4,30 @@ RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/li
 
 WORKDIR /app
 
+# crates.io can stall on slow or flaky links. Allow low-speed downloads to keep
+# retrying instead of aborting the whole image build.
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+    CARGO_HTTP_TIMEOUT=600 \
+    CARGO_HTTP_LOW_SPEED_LIMIT=1 \
+    CARGO_HTTP_MULTIPLEXING=false \
+    CARGO_NET_RETRY=10
+
 # Cache dependencies: copy manifests first, create a dummy lib to build deps
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && \
+RUN --mount=type=cache,id=keystone-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=keystone-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    mkdir src && \
     echo '' > src/lib.rs && \
     echo 'fn main() {}' > src/main.rs && \
-    cargo build --release --bin keystone && \
+    cargo build --release --locked --bin keystone && \
     rm -rf src
 
 # Copy full source and rebuild (only source changed, deps cached)
 COPY src/ src/
 COPY migrations/ migrations/
-RUN touch src/main.rs src/lib.rs && cargo build --release --bin keystone
+RUN --mount=type=cache,id=keystone-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=keystone-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    touch src/main.rs src/lib.rs && cargo build --release --locked --bin keystone
 
 # --- Runtime ---
 FROM debian:bookworm-slim

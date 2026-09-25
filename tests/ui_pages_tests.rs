@@ -25,6 +25,7 @@ const SETUP_HTML: &str = include_str!("../src/static/setup.html");
 const DOCS_HTML: &str = include_str!("../src/static/docs.html");
 const ORPHANS_HTML: &str = include_str!("../src/static/orphans.html");
 const BOTS_HTML: &str = include_str!("../src/static/bots.html");
+const SIDEBAR_HTML: &str = include_str!("../src/static/_sidebar.html");
 
 const KEYSTONE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -699,6 +700,19 @@ fn test_dashboard_page_references_api() {
         html.contains("/api/dashboard") || html.contains("/api/files"),
         "dashboard should reference API endpoints"
     );
+}
+
+#[test]
+fn test_sidebar_has_admin_only_system_stats() {
+    assert!(SIDEBAR_HTML.contains("user && user.role === 'admin'"));
+    assert!(SIDEBAR_HTML.contains("Live Statistics"));
+    assert!(SIDEBAR_HTML.contains("Storage"));
+    assert!(SIDEBAR_HTML.contains("Cache"));
+    assert!(SIDEBAR_HTML.contains("/api/admin/system/stats"));
+    assert!(!SIDEBAR_HTML.contains("/api/system/stats"));
+    assert!(!SIDEBAR_HTML.contains("not visible"));
+    assert!(SIDEBAR_HTML.contains("10000"));
+    assert!(SIDEBAR_HTML.contains("visibilitychange"));
 }
 
 #[test]

@@ -125,7 +125,7 @@ cmd_up() {
   echo ">> building (cached) and starting Keystone..."
   # Builds the image when needed (only changed layers are rebuilt) and
   # recreates the container if the image changed. Volumes keep your data.
-  compose up -d --build
+  compose up -d --build --remove-orphans
   echo
   compose ps
   echo

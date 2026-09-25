@@ -44,6 +44,103 @@
                 </template>
             </nav>
             <div class="p-4 border-t border-gray-200 space-y-3">
+                <template x-if="user && user.role === 'admin'">
+                    <div class="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-2" title="Keystone process and PostgreSQL statistics; updates every 10 seconds"
+                        x-data="{
+                            stats: { app: null, database: null },
+                            loading: false,
+                            refreshTimer: null,
+                            visibilityHandler: null,
+                            init: function() {
+                                this.refreshSystemStats();
+                                this.refreshTimer = window.setInterval(() => this.refreshSystemStats(), 10000);
+                                this.visibilityHandler = () => {
+                                    if (!document.hidden) this.refreshSystemStats();
+                                };
+                                document.addEventListener('visibilitychange', this.visibilityHandler);
+                            },
+                            destroy: function() {
+                                if (this.refreshTimer !== null) window.clearInterval(this.refreshTimer);
+                                if (this.visibilityHandler !== null) document.removeEventListener('visibilitychange', this.visibilityHandler);
+                            },
+                            refreshSystemStats: function() {
+                                if (document.hidden || this.loading) return;
+                                var token = null;
+                                var controller = new AbortController();
+                                var timeout = window.setTimeout(() => controller.abort(), 3000);
+                                try { token = localStorage.getItem('token'); } catch (e) {}
+                                this.loading = true;
+                                fetch('/api/admin/system/stats', {
+                                    cache: 'no-store',
+                                    signal: controller.signal,
+                                    headers: { 'Authorization': 'Bearer ' + (token || '') }
+                                }).then(function(response) {
+                                    if (!response.ok) throw new Error('system stats request failed');
+                                    return response.json();
+                                }).then((data) => {
+                                    this.stats.app = data.app || null;
+                                    this.stats.database = data.database || null;
+                                }).catch(function() {}).finally(() => {
+                                    window.clearTimeout(timeout);
+                                    this.loading = false;
+                                });
+                            },
+                            formatBytes: function(bytes) {
+                                var value = Number(bytes);
+                                if (!Number.isFinite(value) || value < 0) return '--';
+                                if (value === 0) return '0 B';
+                                var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+                                var index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+                                return (value / Math.pow(1024, index)).toFixed(index > 0 ? 1 : 0) + ' ' + units[index];
+                            },
+                            formatPercent: function(value) {
+                                var number = Number(value);
+                                return Number.isFinite(number) ? number.toFixed(1) + '%' : '--';
+                            },
+                            formatConnections: function(database) {
+                                if (!database) return '--';
+                                var active = Number(database.active_connections);
+                                var total = Number(database.total_connections);
+                                if (!Number.isFinite(active) || !Number.isFinite(total)) return '--';
+                                return active.toFixed(0) + ' / ' + total.toFixed(0);
+                            }
+                        }">
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs font-semibold text-gray-700">Live Statistics</span>
+                            <span class="text-[10px] font-medium text-gray-400" x-text="loading ? 'Updating' : '10s'">10s</span>
+                        </div>
+                        <div class="rounded-md bg-white px-2.5 py-2">
+                            <div class="text-[10px] font-semibold uppercase tracking-wide text-indigo-600">App</div>
+                            <div class="mt-1.5 grid grid-cols-2 gap-2">
+                                <div class="min-w-0">
+                                    <div class="text-[9px] uppercase tracking-wide text-gray-400">CPU</div>
+                                    <div class="text-[11px] font-semibold text-gray-700" x-text="stats.app ? formatPercent(stats.app.cpu_usage_percent) : '--'">--</div>
+                                </div>
+                                <div class="min-w-0">
+                                    <div class="text-[9px] uppercase tracking-wide text-gray-400">RAM</div>
+                                    <div class="text-[11px] font-semibold text-gray-700" x-text="stats.app ? formatBytes(stats.app.memory_used_bytes) : '--'">--</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="rounded-md bg-white px-2.5 py-2">
+                            <div class="text-[10px] font-semibold uppercase tracking-wide text-emerald-600">Database</div>
+                            <div class="mt-1.5 grid grid-cols-3 gap-1.5">
+                                <div class="min-w-0">
+                                    <div class="text-[9px] uppercase tracking-wide text-gray-400">Storage</div>
+                                    <div class="text-[11px] font-semibold text-gray-700" x-text="stats.database ? formatBytes(stats.database.size_bytes) : '--'">--</div>
+                                </div>
+                                <div class="min-w-0">
+                                    <div class="text-[9px] uppercase tracking-wide text-gray-400">Active</div>
+                                    <div class="text-[11px] font-semibold text-gray-700" x-text="formatConnections(stats.database)">--</div>
+                                </div>
+                                <div class="min-w-0">
+                                    <div class="text-[9px] uppercase tracking-wide text-gray-400">Cache</div>
+                                    <div class="text-[11px] font-semibold text-gray-700" x-text="stats.database ? formatPercent(stats.database.cache_hit_percent) : '--'">--</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </template>
                 <div class="flex items-center gap-3">
                     <div class="w-8 h-8 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-700 font-medium text-sm" x-text="userInitial"></div>
                     <div class="flex-1 min-w-0">

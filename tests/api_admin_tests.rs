@@ -45,6 +45,63 @@ async fn test_admin_stats_returns_data() {
     assert!(json.get("total_groups").is_some());
 }
 
+#[tokio::test]
+async fn test_system_stats_requires_authentication() {
+    let (app, _token, _state, _temp) = setup_user().await;
+
+    let resp = helpers::get_no_auth(&app, "/api/admin/system/stats").await;
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn test_system_stats_requires_admin() {
+    let (app, token, _state, _temp) = setup_user().await;
+
+    let resp = helpers::get_auth(&app, "/api/admin/system/stats", &token).await;
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn test_system_stats_returns_app_and_database_usage() {
+    let (app, token, _state, _temp) = setup_admin().await;
+
+    let resp = helpers::get_auth(&app, "/api/admin/system/stats", &token).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["cache-control"], "no-store");
+
+    let json = helpers::response_json(resp).await;
+    let app_cpu = json["app"]["cpu_usage_percent"]
+        .as_f64()
+        .expect("missing app CPU usage");
+    let app_memory = json["app"]["memory_used_bytes"]
+        .as_u64()
+        .expect("missing app memory usage");
+    assert!(app_cpu >= 0.0);
+    assert!(app_memory > 0);
+    assert!(json.get("memory_total_bytes").is_none());
+
+    let database = json["database"]
+        .as_object()
+        .expect("missing database statistics");
+    let database_size = database["size_bytes"]
+        .as_u64()
+        .expect("missing database size");
+    let active_connections = database["active_connections"]
+        .as_u64()
+        .expect("missing active connection count");
+    let total_connections = database["total_connections"]
+        .as_u64()
+        .expect("missing total connection count");
+    let cache_hit_percent = database["cache_hit_percent"]
+        .as_f64()
+        .expect("missing cache hit percentage");
+
+    assert!(database_size > 0);
+    assert!(active_connections >= 1);
+    assert!(total_connections >= active_connections);
+    assert!((0.0..=100.0).contains(&cache_hit_percent));
+}
+
 // ─── Admin Settings ──────────────────────────────────────────────────────
 
 #[tokio::test]

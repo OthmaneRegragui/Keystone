@@ -58,6 +58,9 @@ async fn main() {
 
     let settings = keystone::config::Settings::load().expect("failed to load configuration");
 
+    // Prime the CPU sampler before the first metrics request arrives.
+    keystone::api::controllers::health::initialize_system_metrics();
+
     // Record whether we are in production: internal error details are redacted
     // from client responses and HSTS is emitted only then.
     keystone::error::set_production(settings.is_production());
