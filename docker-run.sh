@@ -26,6 +26,8 @@
 #   ./docker-run.sh reset      remove container AND volumes (DESTROYS DATA)
 #   ./docker-run.sh db-reset   delete ALL database data, re-run migrations (fresh schema)
 #   ./docker-run.sh purge      remove container AND its images (data kept)
+#   ./docker-run.sh prune-cache  free build-cache space but KEEP the cargo cache
+#                                mounts (they are what make updates fast)
 #   ./docker-run.sh help       show this help
 
 set -euo pipefail
@@ -59,6 +61,8 @@ Usage:
   ./docker-run.sh reset      remove container AND volumes (DESTROYS DATA)
   ./docker-run.sh db-reset   delete ALL database data, re-run migrations (fresh schema)
   ./docker-run.sh purge      remove container AND its images (data kept)
+  ./docker-run.sh prune-cache  free build-cache space but KEEP the cargo cache
+                               mounts (they are what make updates fast)
   ./docker-run.sh help       show this help
 EOF
 }
@@ -250,6 +254,20 @@ cmd_purge() {
   echo "Container and images removed. Run ./docker-run.sh to rebuild."
 }
 
+cmd_prune_cache() {
+  # Reclaim build-cache space without dropping the warm cargo cache mounts.
+  # A plain `docker builder prune` / `docker system prune` removes those mounts
+  # too, which silently forces the next update to recompile every dependency
+  # (a 30s update becomes several minutes). Pruning only `regular` layers keeps
+  # the mounts intact.
+  if ! docker buildx version >/dev/null 2>&1; then
+    echo "error: this needs 'docker buildx' (bundled with modern Docker)" >&2
+    exit 1
+  fi
+  echo ">> pruning build cache (keeping the warm cargo cache mounts)..."
+  docker buildx prune -f --filter type=regular
+}
+
 # --- dispatch --------------------------------------------------------------
 case "${1:-run}" in
   run|start|up|update) cmd_up ;;
@@ -262,6 +280,7 @@ case "${1:-run}" in
   reset)               cmd_reset ;;
   db-reset|reset-db)   cmd_db_reset ;;
   purge)               cmd_purge ;;
+  prune-cache|prune_cache) cmd_prune_cache ;;
   help|-h|--help)      help_text ;;
   *)
     echo "unknown command: $1" >&2

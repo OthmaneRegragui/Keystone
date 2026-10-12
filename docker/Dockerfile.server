@@ -13,18 +13,24 @@ ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
     CARGO_NET_RETRY=10
 
 # Cache dependencies: copy manifests first, then build the whole dependency
-# graph against a dummy lib/bin. The compiled `target` dir is committed into
-# this image layer (rather than kept only in a BuildKit cache mount) so it is
-# restored from the layer cache on every later build.
+# graph against a dummy lib/bin.
 #
-# Do not move `target` into a `--mount=type=cache`: BuildKit may evict a cache
-# mount independently of the layer cache, so a routine source-only change can
-# silently degrade into a full ~380-crate recompile (a 35s deploy becomes 3-4
-# minutes). The layer cache is what backs the "deps are already compiled" fast
-# path, so the dependencies have to live in it.
+# Everything cargo writes — the compiled `target` dir, the crates.io registry
+# and git checkouts — lives in a BuildKit *cache mount*, never in an image
+# layer. A layer holding compiled deps is ~1 GB, and BuildKit keeps every
+# distinct layer around, so committing deps to a layer grows the build cache by
+# ~1 GB per build (it reached 44 GB here). That bloat is also what broke fast
+# updates: the resulting GC pressure evicted the warm cache, turning a routine
+# 30s source change into a full ~380-crate recompile (~4 min). A cache mount is
+# a single entry updated in place, so the cache stays a couple of GB no matter
+# how many times you build and updates stay fast.
+#
+# Reclaim other cache safely (this keeps the mounts above warm):
+#     docker buildx prune -f --filter type=regular
 COPY Cargo.toml Cargo.lock ./
 RUN --mount=type=cache,id=keystone-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=keystone-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=keystone-cargo-target,target=/app/target,sharing=locked \
     mkdir src && \
     echo '' > src/lib.rs && \
     echo 'fn main() {}' > src/main.rs && \
@@ -37,6 +43,7 @@ COPY src/ src/
 COPY migrations/ migrations/
 RUN --mount=type=cache,id=keystone-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=keystone-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=keystone-cargo-target,target=/app/target,sharing=locked \
     touch src/main.rs src/lib.rs && \
     cargo build --release --locked --bin keystone && \
     cp target/release/keystone /app/server
