@@ -88,32 +88,39 @@ impl CaptchaService {
         &self.verify_url
     }
 
+    /// Read the current captcha configuration in one shot.
+    ///
+    /// Hot-path callers (login) should resolve this once and then use
+    /// [`CaptchaService::enforce_state`]. Calling [`CaptchaService::is_enabled`]
+    /// and [`CaptchaService::enforce`] separately re-reads the toggle and the
+    /// keys each time, so the naive sequence doubles the settings queries.
+    pub async fn load(&self, pool: &PgPool) -> AppResult<CaptchaState> {
+        let enabled = AdminSettingRepository::get_bool(pool, "captcha_enabled").await?;
+        // Keys are only read for an enabled captcha: a disabled instance must
+        // not pay for (or depend on) the settings row.
+        let keys = if enabled {
+            let keys = AdminSettingRepository::get_captcha_keys(pool).await?;
+            AdminCaptchaKeys::new(keys.site_key, keys.secret_key)
+        } else {
+            AdminCaptchaKeys::default()
+        };
+        Ok(CaptchaState { enabled, keys })
+    }
+
     /// Whether the captcha is enforced right now.
     ///
     /// Requires the admin toggle *and* both keys: a site key without a secret
     /// would render a widget the server can never validate (locking everyone
     /// out), and a secret without a site key would break logins for no reason.
     pub async fn is_enabled(&self, pool: &PgPool) -> AppResult<bool> {
-        if !AdminSettingRepository::get_bool(pool, "captcha_enabled").await? {
-            return Ok(false);
-        }
-        Ok(self.keys(pool).await?.is_complete())
+        Ok(self.load(pool).await?.is_active())
     }
 
     /// The public site key, safe to embed in the login page. Empty when the
     /// captcha is not fully configured, so a half-configured instance never
     /// renders a widget it cannot validate.
     pub async fn site_key(&self, pool: &PgPool) -> AppResult<String> {
-        if !AdminSettingRepository::get_bool(pool, "captcha_enabled").await? {
-            return Ok(String::new());
-        }
-        let keys = self.keys(pool).await?;
-        Ok(if keys.is_complete() { keys.site_key } else { String::new() })
-    }
-
-    async fn keys(&self, pool: &PgPool) -> AppResult<AdminCaptchaKeys> {
-        let keys = AdminSettingRepository::get_captcha_keys(pool).await?;
-        Ok(AdminCaptchaKeys::new(keys.site_key, keys.secret_key))
+        Ok(self.load(pool).await?.site_key().to_string())
     }
 
     /// Enforce the captcha for an unauthenticated request.
@@ -128,11 +135,22 @@ impl CaptchaService {
         token: Option<&str>,
         remote_ip: Option<IpAddr>,
     ) -> AppResult<()> {
-        if !AdminSettingRepository::get_bool(pool, "captcha_enabled").await? {
+        let state = self.load(pool).await?;
+        self.enforce_state(&state, token, remote_ip).await
+    }
+
+    /// Enforce using an already-loaded [`CaptchaState`], without re-reading the
+    /// settings. No-op when the captcha is disabled or half-configured.
+    pub async fn enforce_state(
+        &self,
+        state: &CaptchaState,
+        token: Option<&str>,
+        remote_ip: Option<IpAddr>,
+    ) -> AppResult<()> {
+        if !state.enabled {
             return Ok(());
         }
-        let keys = self.keys(pool).await?;
-        self.enforce_with(&keys, token, remote_ip).await
+        self.enforce_with(&state.keys, token, remote_ip).await
     }
 
     /// The actual verification, with the keys already resolved.
@@ -222,6 +240,31 @@ impl CaptchaService {
     }
 }
 
+/// A resolved snapshot of the captcha configuration for a single request.
+///
+/// Produced by [`CaptchaService::load`] so the login path can decide *and*
+/// enforce the captcha from one settings read.
+pub struct CaptchaState {
+    enabled: bool,
+    keys: AdminCaptchaKeys,
+}
+
+impl CaptchaState {
+    /// True when the toggle is on and both keys are present.
+    pub fn is_active(&self) -> bool {
+        self.enabled && self.keys.is_complete()
+    }
+
+    /// The public site key, or `""` when the captcha is not fully configured.
+    pub fn site_key(&self) -> &str {
+        if self.is_active() {
+            &self.keys.site_key
+        } else {
+            ""
+        }
+    }
+}
+
 /// Captcha keys as configured by an admin, trimmed.
 #[derive(Debug, Clone, Default)]
 struct AdminCaptchaKeys {
@@ -287,6 +330,21 @@ mod tests {
         assert!(!keys("", "secret").is_complete());
         assert!(!keys("", "").is_complete());
         assert!(!keys("  ", "  ").is_complete());
+    }
+
+    #[test]
+    fn captcha_state_requires_toggle_and_complete_keys() {
+        let off = CaptchaState { enabled: false, keys: keys("site", "secret") };
+        assert!(!off.is_active());
+        assert_eq!(off.site_key(), "");
+
+        let half = CaptchaState { enabled: true, keys: keys("site", "") };
+        assert!(!half.is_active());
+        assert_eq!(half.site_key(), "");
+
+        let on = CaptchaState { enabled: true, keys: keys("site", "secret") };
+        assert!(on.is_active());
+        assert_eq!(on.site_key(), "site");
     }
 
     #[tokio::test]

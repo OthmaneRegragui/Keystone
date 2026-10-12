@@ -172,7 +172,10 @@ pub async fn login(
     // The token is single-use, so a request that passes here and then fails on
     // bad credentials still burns it: the login page re-solves the widget after
     // every rejected attempt (see static/login.html).
-    if state.captcha_service.is_enabled(state.db.pool()).await? {
+    // Resolve the captcha configuration once; `is_enabled` + `enforce` would
+    // each re-read the toggle and keys, doubling the settings queries here.
+    let captcha = state.captcha_service.load(state.db.pool()).await?;
+    if captcha.is_active() {
         let remote_ip = crate::api::middleware::rate_limit::resolve_client_ip(
             state.config.rate_limit.trust_proxy_headers,
             &connect_info,
@@ -180,7 +183,7 @@ pub async fn login(
         );
         state
             .captcha_service
-            .enforce(state.db.pool(), body.captcha_token.as_deref(), remote_ip)
+            .enforce_state(&captcha, body.captcha_token.as_deref(), remote_ip)
             .await?;
     }
 
