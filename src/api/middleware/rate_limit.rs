@@ -110,12 +110,20 @@ impl RateLimiter {
 /// Resolve the IP to rate-limit. When proxy headers are trusted, the leftmost
 /// `X-Forwarded-For` entry is used (the original client); otherwise the TCP
 /// peer address. Returns `None` only when no address can be determined at all.
-fn client_ip(
-    limiter: &RateLimiter,
+/// Resolve the originating client IP, honoring the operator's proxy-trust
+/// setting: with `trust_proxy_headers` the leftmost `X-Forwarded-For` entry is
+/// used (the original client), otherwise the TCP peer address. Returns `None`
+/// only when no address can be determined at all.
+///
+/// Shared with handlers that need the client address for the same purpose as
+/// rate limiting (e.g. passing `remoteip` to captcha verification), so they
+/// inherit the identical proxy-trust rule rather than inventing a second one.
+pub fn resolve_client_ip(
+    trust_proxy_headers: bool,
     connect_info: &Option<ConnectInfo<SocketAddr>>,
     headers: &axum::http::HeaderMap,
 ) -> Option<IpAddr> {
-    if limiter.trust_proxy_headers {
+    if trust_proxy_headers {
         if let Some(xff) = headers
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
@@ -128,6 +136,14 @@ fn client_ip(
         }
     }
     connect_info.as_ref().map(|ci| ci.0.ip())
+}
+
+fn client_ip(
+    limiter: &RateLimiter,
+    connect_info: &Option<ConnectInfo<SocketAddr>>,
+    headers: &axum::http::HeaderMap,
+) -> Option<IpAddr> {
+    resolve_client_ip(limiter.trust_proxy_headers, connect_info, headers)
 }
 
 /// Axum middleware applying the rate limiter. The limiter state is injected

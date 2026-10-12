@@ -150,6 +150,8 @@ pub async fn register(
 
 pub async fn login(
     State(state): State<Arc<AppState>>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> AppResult<(HeaderMap, Json<AuthResponse>)> {
     // Reject absurdly large inputs up front (uniform 401 so the check itself
@@ -159,6 +161,27 @@ pub async fn login(
         return Err(AppError::Unauthorized(
             "invalid email or password".into(),
         ));
+    }
+
+    // Verify the captcha BEFORE any credential work. Argon2 is deliberately
+    // expensive, and the timing-equalization below means an unknown email costs
+    // the same as a known one — so without this check every bot gets a free
+    // CPU-burning attempt. Verifying first keeps unauthenticated load off the
+    // database and the password hasher entirely.
+    //
+    // The token is single-use, so a request that passes here and then fails on
+    // bad credentials still burns it: the login page re-solves the widget after
+    // every rejected attempt (see static/login.html).
+    if state.captcha_service.is_enabled(state.db.pool()).await? {
+        let remote_ip = crate::api::middleware::rate_limit::resolve_client_ip(
+            state.config.rate_limit.trust_proxy_headers,
+            &connect_info,
+            &headers,
+        );
+        state
+            .captcha_service
+            .enforce(state.db.pool(), body.captcha_token.as_deref(), remote_ip)
+            .await?;
     }
 
     let email = body.email.trim().to_lowercase();

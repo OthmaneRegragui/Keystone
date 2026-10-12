@@ -13,6 +13,7 @@
 - **Virtual folder system** for organizing files within buckets
 - **Drag-and-drop uploads** with real-time progress tracking
 - **Secure authentication** with JWT + Argon2 password hashing + DB-backed refresh sessions (httpOnly cookie, one-time rotation, revocation)
+- **Optional Cloudflare Turnstile CAPTCHA** on the login page, verified server-side and fail-closed
 - **Scoped API keys** for programmatic access (users manage their own from Account → API Keys; admins can create for any user or bot)
 - **Bot accounts** with scoped API keys for automated file operations (admins manage all; eligible users manage their own)
 - **Sharing** — share files and folders with other users by email (recipients can view/download but not reshare; gated by a global toggle and a per-group flag)
@@ -99,6 +100,24 @@ The connection URL is derived from `POSTGRES_*` (percent-encoded automatically, 
 | `KEYSTONE__AUTH__JWT_SECRET` | HMAC signing secret | `change-me-in-production` |
 | `KEYSTONE__AUTH__JWT_EXPIRATION_SECS` | Access token lifetime (seconds) | `43200` (12 hours) |
 | `REFRESH_EXPIRY_DAYS` | Refresh session lifetime (days) — controls the server-side `refresh_tokens` record and the `keystone_refresh` httpOnly cookie | `30` |
+
+### Login CAPTCHA (Cloudflare Turnstile)
+
+Optional, and off on a default install. When active, the login page renders a Turnstile widget and `/auth/login` refuses the request unless the submitted token verifies against Cloudflare — checked *before* any database or Argon2 work, so bots never get to burn CPU on password guessing. Verification **fails closed**: if Cloudflare is unreachable, logins are refused rather than silently left unprotected.
+
+The keys are managed from the **admin panel** (Settings), not the environment. Create a widget in the [Cloudflare dashboard](https://dash.cloudflare.com/?to=/:account/turnstile), then paste the Site Key and Secret Key into the admin settings screen and enable the toggle. They are stored in the `admin_settings` table and read on every login attempt, so rotating or enabling a key takes effect immediately without a restart or image rebuild.
+
+The captcha only becomes active when the toggle is on **and** both keys are present. Enabling the toggle without a complete key pair is rejected loudly in the UI and logged, rather than quietly locking everyone out of login. The toggle also doubles as a kill switch for a Cloudflare outage.
+
+The secret is **write-only**: it is accepted by `PUT /api/admin/settings/captcha` but never returned by any endpoint, and the admin form starts blank so it is never present in the browser. `GET /api/admin/settings` reports only `captcha_secret_configured`.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TURNSTILE_VERIFY_URL` | Verification endpoint override (self-hosted proxy, test stub) | Cloudflare's public `siteverify` |
+
+Cloudflare's official always-pass test keys (`1x00000000000000000000AA` site / `1x0000000000000000000000000000000AA` secret) make it possible to check the whole flow without a live widget.
+
+The public site key is also served by `GET /api/public/settings` (`captcha_enabled`, `captcha_site_key`) so API clients can mirror the login page and know whether a token is required.
 
 ### Storage
 
@@ -335,9 +354,11 @@ Public endpoint. First user automatically becomes admin.
 
 #### POST `/auth/login` — Login
 ```json
-{ "email": "string", "password": "string" }
+{ "email": "string", "password": "string", "captcha_token": "string (only when the CAPTCHA is enabled)" }
 ```
-**Response (200):** Same `AuthResponse`. **Errors:** `401` invalid credentials.
+**Response (200):** Same `AuthResponse`. **Errors:** `401` invalid credentials, `422` missing or rejected `captcha_token`.
+
+`captcha_token` is required only when the instance has a [Cloudflare Turnstile CAPTCHA](#login-captcha-cloudflare-turnstile) configured; it is ignored otherwise. Tokens are single-use and expire after 5 minutes, so a client must obtain a fresh one for every attempt.
 
 #### POST `/auth/refresh` — Refresh Token
 Single-use rotation of the refresh token — the old one is revoked and a new one issued, atomically. The credential is sent in the httpOnly `keystone_refresh` cookie (browser sessions); API clients may put it in the body (`refresh_token`) for backward compatibility.

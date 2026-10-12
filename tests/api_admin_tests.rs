@@ -144,6 +144,161 @@ async fn test_admin_settings_requires_admin() {
     assert_eq!(resp.status(), 403);
 }
 
+// ─── Admin Login Captcha Settings ─────────────────────────────────────────
+
+#[tokio::test]
+async fn test_admin_can_store_captcha_keys() {
+    let (app, token, _state, _temp) = setup_admin().await;
+    let body = serde_json::json!({
+        "enabled": true,
+        "site_key": "site-key-abc",
+        "secret_key": "secret-key-xyz",
+    });
+    let resp = helpers::json_put_auth(&app, "/api/admin/settings/captcha", &body, &token).await;
+    assert_eq!(resp.status(), 200);
+
+    let json = helpers::response_json(helpers::get_auth(&app, "/api/admin/settings", &token).await).await;
+    assert_eq!(json["captcha_site_key"], "site-key-abc");
+    assert_eq!(json["captcha_enabled"], true);
+    assert_eq!(json["captcha_secret_configured"], true);
+}
+
+#[tokio::test]
+async fn test_admin_settings_never_return_the_captcha_secret() {
+    let (app, token, _state, _temp) = setup_admin().await;
+    let body = serde_json::json!({
+        "enabled": true,
+        "site_key": "site-key-abc",
+        "secret_key": "super-secret-value",
+    });
+    helpers::json_put_auth(&app, "/api/admin/settings/captcha", &body, &token).await;
+
+    // Even for an admin, only a "configured" flag is returned: the browser
+    // never needs the secret, so there is no reason to hand it out.
+    let raw = helpers::response_text(helpers::get_auth(&app, "/api/admin/settings", &token).await).await;
+    assert!(!raw.contains("super-secret-value"), "the secret must not be returned");
+    assert!(raw.contains("\"captcha_secret_configured\":true"));
+
+    // And it must not leak through the public settings either.
+    let public =
+        helpers::response_text(helpers::get_no_auth(&app, "/api/public/settings").await).await;
+    assert!(!public.contains("super-secret-value"));
+}
+
+#[tokio::test]
+async fn test_admin_can_rotate_captcha_keys_without_resending_the_secret() {
+    let (app, token, state, _temp) = setup_admin().await;
+    let first = serde_json::json!({
+        "enabled": true,
+        "site_key": "site-key-abc",
+        "secret_key": "secret-one",
+    });
+    helpers::json_put_auth(&app, "/api/admin/settings/captcha", &first, &token).await;
+
+    // Omitting `secret_key` keeps the stored one: the admin form never holds
+    // the secret, so it must not blank it on every save.
+    let rotate_site = serde_json::json!({
+        "enabled": true,
+        "site_key": "site-key-rotated",
+    });
+    let resp = helpers::json_put_auth(&app, "/api/admin/settings/captcha", &rotate_site, &token).await;
+    assert_eq!(resp.status(), 200);
+
+    let json = helpers::response_json(helpers::get_auth(&app, "/api/admin/settings", &token).await).await;
+    assert_eq!(json["captcha_site_key"], "site-key-rotated");
+    assert_eq!(json["captcha_secret_configured"], true);
+
+    // The stored secret itself is unchanged.
+    let stored = keystone::db::repos::AdminSettingRepository::get(
+        state.db.pool(),
+        "turnstile_secret_key",
+    )
+    .await;
+    assert_eq!(stored.unwrap().as_deref(), Some("secret-one"));
+}
+
+#[tokio::test]
+async fn test_admin_settings_report_toggle_and_readiness_separately() {
+    let (app, token, _state, _temp) = setup_admin().await;
+
+    // "Toggle on, keys missing" must be distinguishable from "toggle off",
+    // otherwise the admin screen cannot warn about a captcha that looks
+    // enabled but is not enforcing anything.
+    let body = serde_json::json!({ "enabled": true, "site_key": "", "secret_key": "" });
+    helpers::json_put_auth(&app, "/api/admin/settings/captcha", &body, &token).await;
+
+    let json = helpers::response_json(helpers::get_auth(&app, "/api/admin/settings", &token).await).await;
+    assert_eq!(json["captcha_enabled"], true, "the admin toggle is reported as on");
+    assert_eq!(json["captcha_configured"], false, "but the keys are not complete");
+    assert_eq!(json["captcha_secret_configured"], false);
+    // The login endpoint stays open rather than locking everyone out.
+    let public = helpers::response_json(helpers::get_no_auth(&app, "/api/public/settings").await).await;
+    assert_eq!(public["captcha_enabled"], false, "not actually enforced");
+
+    // With both keys, the two flags agree.
+    let body = serde_json::json!({ "enabled": true, "site_key": "s", "secret_key": "k" });
+    helpers::json_put_auth(&app, "/api/admin/settings/captcha", &body, &token).await;
+    let json = helpers::response_json(helpers::get_auth(&app, "/api/admin/settings", &token).await).await;
+    assert_eq!(json["captcha_enabled"], true);
+    assert_eq!(json["captcha_configured"], true);
+
+    // Toggle off with the keys still stored: "configured but off".
+    let body = serde_json::json!({ "enabled": false, "site_key": "s" });
+    helpers::json_put_auth(&app, "/api/admin/settings/captcha", &body, &token).await;
+    let json = helpers::response_json(helpers::get_auth(&app, "/api/admin/settings", &token).await).await;
+    assert_eq!(json["captcha_enabled"], false);
+    assert_eq!(json["captcha_configured"], true, "the keys are still stored");
+    let public = helpers::response_json(helpers::get_no_auth(&app, "/api/public/settings").await).await;
+    assert_eq!(public["captcha_enabled"], false, "the toggle is a kill switch");
+}
+
+#[tokio::test]
+async fn test_admin_can_clear_the_captcha_secret() {
+    let (app, token, _state, _temp) = setup_admin().await;
+    let first = serde_json::json!({
+        "enabled": true,
+        "site_key": "site-key-abc",
+        "secret_key": "secret-one",
+    });
+    helpers::json_put_auth(&app, "/api/admin/settings/captcha", &first, &token).await;
+
+    // An explicitly empty secret clears it, which turns the captcha inactive.
+    let clear = serde_json::json!({
+        "enabled": true,
+        "site_key": "site-key-abc",
+        "secret_key": "",
+    });
+    let resp = helpers::json_put_auth(&app, "/api/admin/settings/captcha", &clear, &token).await;
+    assert_eq!(resp.status(), 200);
+
+    let json = helpers::response_json(helpers::get_auth(&app, "/api/admin/settings", &token).await).await;
+    assert_eq!(json["captcha_secret_configured"], false);
+}
+
+#[tokio::test]
+async fn test_admin_captcha_settings_require_admin() {
+    let (app, token, _state, _temp) = setup_user().await;
+    let body = serde_json::json!({
+        "enabled": true,
+        "site_key": "site-key-abc",
+        "secret_key": "secret-key-xyz",
+    });
+    let resp = helpers::json_put_auth(&app, "/api/admin/settings/captcha", &body, &token).await;
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn test_admin_captcha_settings_reject_absurdly_long_keys() {
+    let (app, token, _state, _temp) = setup_admin().await;
+    let body = serde_json::json!({
+        "enabled": true,
+        "site_key": "x".repeat(5000),
+        "secret_key": "secret-key-xyz",
+    });
+    let resp = helpers::json_put_auth(&app, "/api/admin/settings/captcha", &body, &token).await;
+    assert_eq!(resp.status(), 400);
+}
+
 // ─── Admin Update Check ──────────────────────────────────────────────────
 
 #[tokio::test]

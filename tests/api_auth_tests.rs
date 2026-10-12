@@ -157,6 +157,217 @@ async fn test_login_nonexistent_email() {
     assert_eq!(resp.status(), 401);
 }
 
+// ─── Login CAPTCHA Tests ──────────────────────────────────────────────────────
+//
+// The captcha is exercised against an unreachable `siteverify` endpoint (see
+// helpers::build_captcha_app), so these tests stay offline: a missing token is
+// rejected before any network call, and a supplied token fails closed on the
+// connection error. What they prove is that enforcement happens on the server
+// and *before* the credentials are ever checked — a client that simply omits
+// the widget cannot log in.
+
+#[tokio::test]
+async fn test_login_rejects_missing_captcha_token() {
+    let (app, _state, _tmp) = helpers::build_captcha_app("site-key", "secret-key").await;
+
+    let _ = helpers::register_user(&app, "alice", "alice@test.com", "password123").await;
+
+    let resp = helpers::json_post(
+        &app,
+        "/auth/login",
+        &serde_json::json!({
+            "email": "alice@test.com",
+            "password": "password123",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 422);
+
+    let json = helpers::response_json(resp).await;
+    assert!(json["detail"]
+        .as_str()
+        .unwrap()
+        .contains("complete the verification challenge"));
+}
+
+#[tokio::test]
+async fn test_login_rejects_blank_captcha_token() {
+    let (app, _state, _tmp) = helpers::build_captcha_app("site-key", "secret-key").await;
+
+    let _ = helpers::register_user(&app, "alice", "alice@test.com", "password123").await;
+
+    let resp = helpers::json_post(
+        &app,
+        "/auth/login",
+        &serde_json::json!({
+            "email": "alice@test.com",
+            "password": "password123",
+            "captcha_token": "   ",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 422);
+}
+
+#[tokio::test]
+async fn test_login_fails_closed_when_verifier_unreachable() {
+    // Correct credentials must NOT be enough when the captcha cannot confirm
+    // the challenge: failing open here would let a Cloudflare outage silently
+    // turn into an unprotected login endpoint.
+    let (app, _state, _tmp) = helpers::build_captcha_app("site-key", "secret-key").await;
+
+    let _ = helpers::register_user(&app, "alice", "alice@test.com", "password123").await;
+
+    let resp = helpers::json_post(
+        &app,
+        "/auth/login",
+        &serde_json::json!({
+            "email": "alice@test.com",
+            "password": "password123",
+            "captcha_token": "whatever-token",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 422);
+
+    let json = helpers::response_json(resp).await;
+    assert!(json["detail"]
+        .as_str()
+        .unwrap()
+        .contains("temporarily unavailable"));
+}
+
+#[tokio::test]
+async fn test_login_captcha_checked_before_credentials() {
+    // An unknown email must be rejected with the captcha error, not 401. If the
+    // captcha ran after the credential lookup, a bot could probe which emails
+    // exist (and burn Argon2) by simply omitting the token.
+    let (app, _state, _tmp) = helpers::build_captcha_app("site-key", "secret-key").await;
+
+    let resp = helpers::json_post(
+        &app,
+        "/auth/login",
+        &serde_json::json!({
+            "email": "nobody@test.com",
+            "password": "password123",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 422);
+}
+
+#[tokio::test]
+async fn test_login_ignores_captcha_token_when_disabled() {
+    // Default install: no captcha configured, so the field is simply ignored
+    // and login behaves exactly as before.
+    let (app, _tmp) = helpers::build_reset_app().await;
+
+    let _ = helpers::register_user(&app, "alice", "alice@test.com", "password123").await;
+
+    let resp = helpers::json_post(
+        &app,
+        "/auth/login",
+        &serde_json::json!({
+            "email": "alice@test.com",
+            "password": "password123",
+            "captcha_token": "ignored",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_login_captcha_disabled_when_only_site_key_set() {
+    // Half-configured setups must not lock everyone out: with no secret there is
+    // no way to validate a token, so the captcha stays off.
+    let (app, _state, _tmp) = helpers::build_captcha_app("site-key", "").await;
+
+    let _ = helpers::register_user(&app, "alice", "alice@test.com", "password123").await;
+
+    let resp = helpers::json_post(
+        &app,
+        "/auth/login",
+        &serde_json::json!({
+            "email": "alice@test.com",
+            "password": "password123",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_login_captcha_disabled_when_admin_toggle_is_off() {
+    // A complete key pair with the admin toggle off must stay inactive: the
+    // toggle is the operator's kill switch (e.g. during a Cloudflare outage).
+    let (app, state, _tmp) = helpers::build_captcha_app("site-key", "secret-key").await;
+    helpers::set_captcha_enabled(&state, false).await;
+
+    let _ = helpers::register_user(&app, "alice", "alice@test.com", "password123").await;
+    let resp = helpers::json_post(
+        &app,
+        "/auth/login",
+        &serde_json::json!({
+            "email": "alice@test.com",
+            "password": "password123",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_captcha_settings_can_be_rotated_at_runtime() {
+    // Keys are read per request, not cached at boot: an admin rotating the key
+    // takes effect on the very next login, with no restart.
+    let (app, state, _tmp) = helpers::build_captcha_app("old-site", "old-secret").await;
+    let _ = helpers::register_user(&app, "alice", "alice@test.com", "password123").await;
+
+    helpers::set_captcha_keys(&state, "new-site", "new-secret", true).await;
+
+    // The public settings now advertise the new site key...
+    let json = helpers::response_json(helpers::get_no_auth(&app, "/api/public/settings").await).await;
+    assert_eq!(json["captcha_site_key"], "new-site");
+
+    // ...and login is enforced, still without any network call.
+    let resp = helpers::json_post(
+        &app,
+        "/auth/login",
+        &serde_json::json!({
+            "email": "alice@test.com",
+            "password": "password123",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 422);
+}
+
+#[tokio::test]
+async fn test_public_settings_reports_captcha_state() {
+    let (app, _state, _tmp) = helpers::build_captcha_app("site-key", "secret-key").await;
+
+    let resp = helpers::get_no_auth(&app, "/api/public/settings").await;
+    assert_eq!(resp.status(), 200);
+
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["captcha_enabled"], true);
+    // The site key is public by design (Cloudflare embeds it in every page).
+    assert_eq!(json["captcha_site_key"], "site-key");
+}
+
+#[tokio::test]
+async fn test_public_settings_reports_no_captcha_by_default() {
+    let (app, _tmp) = helpers::build_reset_app().await;
+
+    let resp = helpers::get_no_auth(&app, "/api/public/settings").await;
+    assert_eq!(resp.status(), 200);
+
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["captcha_enabled"], false);
+    assert_eq!(json["captcha_site_key"], "");
+}
+
 // ─── Refresh Token Tests ─────────────────────────────────────────────────────
 
 #[tokio::test]

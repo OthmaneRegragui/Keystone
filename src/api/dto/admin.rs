@@ -12,6 +12,21 @@ pub struct UpdateSettingRequest {
     pub value: String,
 }
 
+/// Store the Cloudflare Turnstile keys used by the login captcha.
+///
+/// The secret is **write-only**: it is accepted here but never returned by any
+/// endpoint, and omitting it keeps the stored value unchanged so the admin form
+/// can be re-saved without holding the secret in the browser.
+#[derive(Debug, Deserialize)]
+pub struct UpdateCaptchaSettingRequest {
+    pub enabled: bool,
+    #[serde(default)]
+    pub site_key: String,
+    /// `None` leaves the stored secret untouched, `Some("")` clears it.
+    #[serde(default)]
+    pub secret_key: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateBucketRequest {
     pub name: String,

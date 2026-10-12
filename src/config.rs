@@ -229,6 +229,19 @@ impl Default for CorsConfig {
     }
 }
 
+/// Server-side Cloudflare Turnstile (CAPTCHA) settings.
+///
+/// The keys themselves are NOT configured here: admins manage them from the
+/// admin settings screen and they live in the `admin_settings` table, so they
+/// can be rotated without a restart. Only the verification endpoint stays in
+/// the environment, because it is an operational knob rather than a secret.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CaptchaConfig {
+    /// siteverify endpoint. Overridable for tests and for self-hosted proxies;
+    /// empty falls back to Cloudflare's public endpoint.
+    pub turnstile_verify_url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityConfig {
     /// Token used to encrypt/decrypt sensitive values at rest.
@@ -258,6 +271,11 @@ pub struct Settings {
     pub rate_limit: RateLimitConfig,
     pub cors: CorsConfig,
     pub security: SecurityConfig,
+    /// Optional Cloudflare Turnstile captcha. `#[serde(default)]` so configs
+    /// written before this section existed (and the minimal test config) still
+    /// deserialize, with the captcha simply disabled.
+    #[serde(default)]
+    pub captcha: CaptchaConfig,
 }
 
 impl Settings {
@@ -321,6 +339,9 @@ impl Settings {
             },
             "security": {
                 "encryption_token": "change-me-in-production",
+            },
+            "captcha": {
+                "turnstile_verify_url": "",
             },
         });
 
@@ -415,6 +436,21 @@ impl Settings {
                     .collect();
                 if !origins.is_empty() {
                     settings.cors.allowed_origins = origins;
+                }
+            }
+        }
+
+        // TURNSTILE_VERIFY_URL: plain env var for the siteverify endpoint (used
+        // by tests and self-hosted proxies). The Turnstile keys themselves are
+        // admin-managed in the database, not environment variables. The
+        // KEYSTONE__CAPTCHA__* form wins when both are set. Blank values are
+        // ignored so an empty `TURNSTILE_VERIFY_URL=` cannot break a live
+        // instance.
+        if std::env::var_os("KEYSTONE__CAPTCHA__TURNSTILE_VERIFY_URL").is_none() {
+            if let Ok(raw) = std::env::var("TURNSTILE_VERIFY_URL") {
+                let raw = raw.trim();
+                if !raw.is_empty() {
+                    settings.captcha.turnstile_verify_url = raw.to_string();
                 }
             }
         }

@@ -110,6 +110,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
                     .route("/orphaned-files/:id/download", axum::routing::get(crate::api::controllers::admin::download_orphaned_file))
                     .route("/settings", axum::routing::get(crate::api::controllers::admin::get_settings))
                     .route("/settings", axum::routing::put(crate::api::controllers::admin::update_setting))
+                    .route("/settings/captcha", axum::routing::put(crate::api::controllers::admin::update_captcha_setting))
                     .route("/update-check", axum::routing::get(crate::api::controllers::admin::check_update))
                     .route("/update-apply", axum::routing::post(crate::api::controllers::admin::apply_update))
                     .route("/backends", axum::routing::get(crate::api::controllers::admin::list_storage_backends))

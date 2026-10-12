@@ -2,13 +2,14 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use keystone::api::routes::api_routes;
-use keystone::config::Settings;
-use keystone::db::repos::UserRepository;
+use keystone::config::{CaptchaConfig, Settings};
+use keystone::db::repos::{AdminSettingRepository, UserRepository};
 use keystone::db::rows::user_row::CreateUserData;
 use keystone::db::Database;
 use keystone::models::UserRole;
 use keystone::storage::local::LocalFsBackend;
 use keystone::storage::StorageRegistry;
+use keystone::utils::auth::captcha::CaptchaService;
 use keystone::utils::auth::jwt::JwtService;
 use keystone::utils::auth::session::SessionService;
 use keystone::AppState;
@@ -149,12 +150,16 @@ pub async fn reset_db(db: &Database) {
     .await
     .expect("Failed to truncate test tables");
 
-    // Re-seed defaults, mirroring migration 0002_admin_settings.sql.
+    // Re-seed defaults, mirroring migrations 0002_admin_settings.sql and
+    // 0025_login_captcha.sql.
     sqlx::query(
         "INSERT INTO admin_settings (key, value, updated_at) VALUES \
             ('block_registrations', 'true', NOW()), \
             ('default_bucket', 'default', NOW()), \
-            ('allow_multi_bucket', 'false', NOW()) \
+            ('allow_multi_bucket', 'false', NOW()), \
+            ('captcha_enabled', 'false', NOW()), \
+            ('turnstile_site_key', '', NOW()), \
+            ('turnstile_secret_key', '', NOW()) \
          ON CONFLICT (key) DO NOTHING",
     )
     .execute(db.pool())
@@ -164,6 +169,20 @@ pub async fn reset_db(db: &Database) {
 
 /// Build a full test AppState with in-memory DB, temp storage, JWT, etc.
 pub async fn build_test_state() -> (Arc<AppState>, tempfile::TempDir) {
+    build_test_state_with_captcha(CaptchaConfig::default()).await
+}
+
+/// Build a test AppState with a specific login CAPTCHA configuration.
+///
+/// The keys are admin-managed in the database; this only controls the
+/// server-side `siteverify` endpoint. Pass [`CaptchaConfig::default()`] to talk
+/// to Cloudflare, or point `turnstile_verify_url` at an unreachable address to
+/// keep tests offline and deterministic: a missing token is rejected before any
+/// network call, and a supplied token fails closed on the connection error
+/// instead of ever reaching Cloudflare. Use [`enable_captcha`] to store the keys.
+pub async fn build_test_state_with_captcha(
+    captcha: CaptchaConfig,
+) -> (Arc<AppState>, tempfile::TempDir) {
     let db = setup_test_db().await;
     let temp_dir = setup_test_storage();
 
@@ -174,7 +193,7 @@ pub async fn build_test_state() -> (Arc<AppState>, tempfile::TempDir) {
     let backend = LocalFsBackend::new(temp_dir.path()).expect("Failed to create backend");
     storage.register("default".to_string(), Arc::new(backend));
 
-    let config = Settings::load().unwrap_or_else(|_| {
+    let mut config = Settings::load().unwrap_or_else(|_| {
         // Fallback: create a minimal config for tests
         serde_json::from_str(r#"{
             "app_env": "test",
@@ -187,12 +206,14 @@ pub async fn build_test_state() -> (Arc<AppState>, tempfile::TempDir) {
             "cors": {"allowed_origins": ["http://localhost:3000"], "allowed_methods": ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"], "allowed_headers": ["authorization", "content-type"], "allow_credentials": true, "max_age_secs": 3600}
         }"#).unwrap()
     });
+    config.captcha = captcha;
 
     let state = Arc::new(AppState {
         db,
         jwt_service,
         storage: RwLock::new(storage),
         session_service,
+        captcha_service: CaptchaService::new(&config.captcha),
         config,
     });
 
@@ -217,6 +238,61 @@ pub async fn build_reset_app() -> (axum::Router, tempfile::TempDir) {
         .layer(axum::extract::Extension(state.clone()))
         .with_state(state);
     (app, temp_dir)
+}
+
+/// Build a router with the login CAPTCHA enabled and an unreachable `siteverify`
+/// endpoint, so captcha enforcement is exercised without network access.
+///
+/// Returns the state too, so a test can rotate the admin-managed keys and
+/// observe the change without a restart.
+pub async fn build_captcha_app(
+    site_key: &str,
+    secret_key: &str,
+) -> (axum::Router, Arc<AppState>, tempfile::TempDir) {
+    let (state, temp_dir) = build_test_state_with_captcha(CaptchaConfig {
+        turnstile_verify_url: "http://127.0.0.1:9/siteverify".to_string(),
+    })
+    .await;
+    reset_db(&state.db).await;
+    enable_captcha(&state, site_key, secret_key, true).await;
+    let app = api_routes()
+        .layer(axum::extract::Extension(state.clone()))
+        .with_state(state.clone());
+    (app, state, temp_dir)
+}
+
+/// Store admin-managed Turnstile keys, exactly as the admin settings endpoint
+/// does. `enabled` is the admin toggle; an incomplete key pair leaves the
+/// captcha inactive.
+pub async fn enable_captcha(
+    state: &Arc<AppState>,
+    site_key: &str,
+    secret_key: &str,
+    enabled: bool,
+) {
+    AdminSettingRepository::set_captcha(state.db.pool(), enabled, site_key, Some(secret_key))
+        .await
+        .expect("Failed to store captcha settings");
+}
+
+/// Flip only the admin toggle, leaving the stored keys untouched.
+pub async fn set_captcha_enabled(state: &Arc<AppState>, enabled: bool) {
+    AdminSettingRepository::set_bool(state.db.pool(), "captcha_enabled", enabled)
+        .await
+        .expect("Failed to store the captcha toggle");
+}
+
+/// Rotate the stored keys through the same repository call the admin settings
+/// endpoint makes. An empty `secret_key` clears the stored secret.
+pub async fn set_captcha_keys(
+    state: &Arc<AppState>,
+    site_key: &str,
+    secret_key: &str,
+    enabled: bool,
+) {
+    AdminSettingRepository::set_captcha(state.db.pool(), enabled, site_key, Some(secret_key))
+        .await
+        .expect("Failed to store captcha settings");
 }
 
 /// Create a test user in the database and return (user_id, username, email, password)
@@ -450,6 +526,13 @@ pub async fn get_no_auth(
 }
 
 /// Parse response body as JSON
+/// Raw response body as text, for assertions about what is *not* in a payload.
+pub async fn response_text(response: axum::http::Response<axum::body::Body>) -> String {
+    use http_body_util::BodyExt;
+    let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8_lossy(&body_bytes).to_string()
+}
+
 pub async fn response_json(response: axum::http::Response<axum::body::Body>) -> serde_json::Value {
     use http_body_util::BodyExt;
     let body_bytes = response.into_body().collect().await.unwrap().to_bytes();

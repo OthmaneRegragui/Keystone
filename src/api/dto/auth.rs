@@ -18,6 +18,11 @@ pub struct RegisterRequest {
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
+    /// Cloudflare Turnstile token proving a human solved the challenge. Only
+    /// required when the instance has a captcha configured; when it is not, the
+    /// field is simply ignored.
+    #[serde(default)]
+    pub captcha_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

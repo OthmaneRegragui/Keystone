@@ -269,7 +269,7 @@ docker exec keystone-postgres psql -U keystone -d keystone -c "SELECT version();
                                 </thead>
                                 <tbody class="divide-y divide-gray-100">
                                     <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/register</td><td class="py-2">Create account (disabled when registration is blocked)</td></tr>
-                                    <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/login</td><td class="py-2">Exchange credentials for access + refresh tokens</td></tr>
+                                    <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/login</td><td class="py-2">Exchange credentials for access + refresh tokens. Adds <code>{ "captcha_token" }</code> when a Cloudflare Turnstile CAPTCHA is enabled in the admin settings (single-use token, required only then).</td></tr>
                                     <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/refresh</td><td class="py-2">Rotate the DB-backed session (single-use — old token revoked; httpOnly cookie set). Optional body: <code>{ "refresh_token" }</code>; the cookie is used by default.</td></tr>
                                     <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/logout</td><td class="py-2">Revoke the server-side session and clear the httpOnly cookie. Optional body: <code>{ "refresh_token" }</code>; cookie is preferred.</td></tr>
                                     <tr><td class="py-2 pr-4 font-mono text-xs text-indigo-600">POST</td><td class="py-2 pr-4 font-mono text-xs">/auth/forgot-password</td><td class="py-2">Request a password reset token</td></tr>
@@ -302,7 +302,7 @@ docker exec keystone-postgres psql -U keystone -d keystone -c "SELECT version();
                                     <tr><td class="py-2 pr-4 font-mono text-xs text-rose-600">DELETE</td><td class="py-2 pr-4 font-mono text-xs">/api/folders/:id</td><td class="py-2">Delete folder</td></tr>
                                      <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/health</td><td class="py-2">Health check (no auth)</td></tr>
                                      <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/health/ready</td><td class="py-2">Readiness (DB + storage, no auth)</td></tr>
-                                     <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/public/settings</td><td class="py-2">Public platform settings (no auth)</td></tr>
+                                     <tr><td class="py-2 pr-4 font-mono text-xs text-sky-600">GET</td><td class="py-2 pr-4 font-mono text-xs">/api/public/settings</td><td class="py-2">Public platform settings (no auth): <code>block_registrations</code>, <code>captcha_enabled</code>, <code>captcha_site_key</code></td></tr>
                                 </tbody>
                             </table>
                         </div>

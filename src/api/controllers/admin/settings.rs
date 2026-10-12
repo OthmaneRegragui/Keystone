@@ -4,11 +4,14 @@ use axum::extract::State;
 use axum::Json;
 use crate::error::{AppError, AppResult};
 use crate::db::repos::AdminSettingRepository;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::dto::*;
 use crate::api::extractors::AuthUser;
 use crate::AppState;
+
+/// Defensive bound on a stored Turnstile key. Real keys are ~35 characters.
+const MAX_CAPTCHA_KEY_LEN: usize = 256;
 
 /// The version of the currently running server binary.
 pub fn current_version() -> &'static str {
@@ -354,6 +357,55 @@ pub async fn update_setting(
         }
     }
     Ok(Json(MessageResponse { message: "setting updated".to_string() }))
+}
+
+/// Store the login captcha configuration (admin-managed Turnstile keys).
+///
+/// Keys take effect on the next login attempt: verification reads them from the
+/// database per request rather than from a cached startup snapshot, so rotating
+/// a key here does not require a restart.
+pub async fn update_captcha_setting(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Json(body): Json<UpdateCaptchaSettingRequest>,
+) -> AppResult<Json<MessageResponse>> {
+    auth.require_admin()?;
+
+    let site_key = body.site_key.trim();
+    if site_key.len() > MAX_CAPTCHA_KEY_LEN {
+        return Err(AppError::BadRequest("site key is too long".into()));
+    }
+    // `None` keeps the stored secret; `Some("")` clears it.
+    let secret_key = match body.secret_key.as_deref().map(str::trim) {
+        Some(secret) if secret.len() > MAX_CAPTCHA_KEY_LEN => {
+            return Err(AppError::BadRequest("secret key is too long".into()));
+        }
+        other => other,
+    };
+
+    AdminSettingRepository::set_captcha(state.db.pool(), body.enabled, site_key, secret_key).await?;
+
+    // Enabling the captcha without a complete key pair would lock every user
+    // out of login, so the server stays inactive and says so loudly rather than
+    // honouring a half-configured toggle.
+    let active = state.captcha_service.is_enabled(state.db.pool()).await?;
+    if body.enabled && !active {
+        warn!(
+            requested_by = %auth.username,
+            "captcha enabled without a complete key pair; the login captcha stays inactive"
+        );
+    }
+    info!(
+        admin = %auth.username,
+        site_key_configured = !site_key.is_empty(),
+        secret_key_updated = secret_key.is_some(),
+        active,
+        "admin updated the login captcha settings"
+    );
+
+    Ok(Json(MessageResponse {
+        message: "setting updated".to_string(),
+    }))
 }
 
 #[cfg(test)]

@@ -165,7 +165,15 @@ pub async fn public_settings(
     let block = AdminSettingRepository::get_bool(state.db.pool(), "block_registrations")
         .await
         .unwrap_or(true);
+    // The site key is public by design (Cloudflare embeds it in every visitor's
+    // page), so exposing it here is not a secret leak — and it lets any API
+    // client mirror the login page and know whether a token is required. The
+    // secret key is never exposed anywhere.
+    let captcha = state.captcha_service.site_key(state.db.pool()).await;
+    let captcha_enabled = captcha.as_ref().is_ok_and(|key| !key.is_empty());
     Json(json!({
         "block_registrations": block,
+        "captcha_enabled": captcha_enabled,
+        "captcha_site_key": captcha.unwrap_or_default(),
     }))
 }

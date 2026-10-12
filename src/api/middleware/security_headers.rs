@@ -10,9 +10,16 @@ use axum::response::Response;
 // inline <script>/<style> blocks, self-hosted vendor assets, and Alpine.js,
 // which compiles its `x-` directives with eval at runtime. Everything else is
 // locked down.
-const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; \
-style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; \
-connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+//
+// `https://challenges.cloudflare.com` (Cloudflare Turnstile, the optional login
+// CAPTCHA) is the one external origin allowed, and only in the three directives
+// the widget actually needs: its script, the iframe it renders in, and the XHR
+// it uses to fetch and validate challenges. It is inert when no captcha is
+// configured, since nothing on the page then references it.
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' \
+    https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; \
+    media-src 'self' blob:; connect-src 'self' https://challenges.cloudflare.com; \
+    frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
 // HSTS is only meaningful — and only honored by browsers — over HTTPS, so it
 // is emitted only in production, where the deployment is expected to run

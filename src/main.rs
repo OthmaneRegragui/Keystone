@@ -39,6 +39,10 @@ const TRASH_HTML: &str = include_str!("static/trash.html");
 const SHARED_HTML: &str = include_str!("static/shared.html");
 const SIDEBAR_HTML: &str = include_str!("static/_sidebar.html");
 
+/// Placeholder in `login.html` replaced at serve time with the captcha site
+/// key (empty when the captcha is disabled).
+const TURNSTILE_SITE_KEY_PLACEHOLDER: &str = "__TURNSTILE_SITE_KEY__";
+
 // Vendored assets (self-hosted so the UI works fully offline — no CDN).
 const ALPINE_JS: &str = include_str!("static/vendor/alpine.min.js");
 const TAILWIND_JS: &str = include_str!("static/vendor/tailwind.min.js");
@@ -97,6 +101,10 @@ async fn main() {
         }
     }
 
+    // The login CAPTCHA keys are admin-managed (admin settings screen), so there
+    // is nothing to validate here at boot; a half-configured captcha is detected
+    // per request and reported to the admin who enabled it.
+
     let db = Database::new_with_config(&settings.database)
         .await
         .expect("failed to connect to database");
@@ -144,6 +152,7 @@ async fn main() {
         jwt_service,
         storage: RwLock::new(storage),
         session_service,
+        captcha_service: keystone::utils::auth::captcha::CaptchaService::new(&settings.captcha),
         config: settings.clone(),
     });
 
@@ -278,7 +287,25 @@ async fn ui_handler(
             APP_THEME_CSS,
         )
             .into_response(),
-        "/auth/login" | "/login" => HtmlResponse(versioned(LOGIN_HTML)).into_response(),
+        "/auth/login" | "/login" => {
+            // The captcha site key is public by design (Cloudflare ships it to
+            // every visitor's browser), so it is embedded straight into the page
+            // instead of costing the login form an extra request. It is read per
+            // request (not cached at boot) so an admin enabling or rotating the
+            // key sees the change on the next page load. It is empty when no
+            // captcha is configured, which is what keeps the widget hidden on a
+            // default install.
+            let site_key = state
+                .captcha_service
+                .site_key(state.db.pool())
+                .await
+                .unwrap_or_default();
+            let html = LOGIN_HTML.replace(
+                TURNSTILE_SITE_KEY_PLACEHOLDER,
+                &js_string_escape(&site_key),
+            );
+            HtmlResponse(versioned(&html)).into_response()
+        }
         "/auth/register" | "/register" => {
             let blocked = AdminSettingRepository::get_bool(state.db.pool(), "block_registrations")
                 .await
@@ -408,13 +435,70 @@ fn parse_refresh_cookie(header: &str) -> Option<String> {
     })
 }
 
-fn versioned(html: &'static str) -> String {
+fn versioned(html: &str) -> String {
     html.replace("<!--SIDEBAR-->", SIDEBAR_HTML)
         .replace("__KEYSTONE_VERSION__", KEYSTONE_VERSION)
+}
+
+/// Escape a value so it can be embedded inside a double-quoted JavaScript
+/// string literal. The Turnstile site key comes from the operator's
+/// environment, so it is escaped defensively before being written into an
+/// inline `<script>` block.
+fn js_string_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            // `<`, `>` and `&` cannot close the surrounding <script> element.
+            '<' => out.push_str("\\u003c"),
+            '>' => out.push_str("\\u003e"),
+            '&' => out.push_str("\\u0026"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 impl IntoResponse for HtmlResponse {
     fn into_response(self) -> Response {
         axum::response::Html(self.0).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn js_string_escape_leaves_ordinary_site_keys_alone() {
+        // Real Turnstile site keys are alphanumeric with dashes/underscores;
+        // they must pass through byte-for-byte or the widget would not render.
+        assert_eq!(js_string_escape("0x4AAAAAAADnPIDROrmt1Wwj"), "0x4AAAAAAADnPIDROrmt1Wwj");
+        assert_eq!(js_string_escape(""), "");
+    }
+
+    #[test]
+    fn js_string_escape_neutralizes_string_and_script_breakers() {
+        // The site key is operator-supplied, so a value crafted to break out of
+        // the JS string literal (or close the <script> element) must not.
+        assert_eq!(js_string_escape("a\"b"), "a\\\"b");
+        assert_eq!(js_string_escape("a\\b"), "a\\\\b");
+        assert_eq!(js_string_escape("a'b"), "a\\'b");
+        assert_eq!(js_string_escape("</script>"), "\\u003c/script\\u003e");
+        assert_eq!(js_string_escape("a\nb"), "a\\nb");
+        assert_eq!(js_string_escape("a\u{0}b"), "a\\u0000b");
+        assert_eq!(js_string_escape("a\u{7}b"), "a\\u0007b");
+    }
+
+    #[test]
+    fn versioned_substitutes_version_only() {
+        assert_eq!(versioned("v=__KEYSTONE_VERSION__"), format!("v={KEYSTONE_VERSION}"));
+        // The site key placeholder is substituted separately, per request.
+        assert!(versioned(TURNSTILE_SITE_KEY_PLACEHOLDER).contains(TURNSTILE_SITE_KEY_PLACEHOLDER));
     }
 }

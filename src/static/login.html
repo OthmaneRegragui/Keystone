@@ -19,14 +19,97 @@
     </script>
     <link rel="stylesheet" href="/static/app-theme.css?v=__KEYSTONE_VERSION__">
     <script>
+        // Cloudflare Turnstile site key, injected by the server. Empty when no
+        // captcha is configured, which keeps the widget out of the page entirely.
+        var TURNSTILE_SITE_KEY = "__TURNSTILE_SITE_KEY__";
+
+        // Captcha state. Turnstile tokens are single-use, so the widget is
+        // reset after every rejected attempt (bad credentials included).
+        var captcha = {
+            enabled: !!TURNSTILE_SITE_KEY,
+            solved: false,
+            widgetId: null
+        };
+
+        function setSubmitEnabled(enabled) {
+            var btn = document.getElementById('submit-btn');
+            if (btn) btn.disabled = !enabled;
+        }
+
+        function captchaToken() {
+            var el = document.getElementById('captcha-token');
+            return el ? el.value : '';
+        }
+
+        function onCaptchaSolved(token) {
+            captcha.solved = true;
+            var el = document.getElementById('captcha-token');
+            if (el) el.value = token || '';
+            setSubmitEnabled(true);
+        }
+
+        // Called when the token expires, is spent, or the challenge errors.
+        function onCaptchaInvalid() {
+            captcha.solved = false;
+            var el = document.getElementById('captcha-token');
+            if (el) el.value = '';
+            setSubmitEnabled(!captcha.enabled);
+        }
+
+        function resetCaptcha() {
+            if (!captcha.enabled) return;
+            if (captcha.widgetId === null || typeof window.turnstile === 'undefined') {
+                // No live widget to reset. Say so and let the user try again
+                // rather than leaving a disabled button with no explanation.
+                setSubmitEnabled(true);
+                showError('The verification challenge is no longer available. Please reload the page and try again.');
+                return;
+            }
+            window.turnstile.reset(captcha.widgetId);
+        }
+
+        function initCaptcha() {
+            if (!captcha.enabled) return;
+            var host = document.getElementById('captcha');
+            if (host) host.style.display = 'block';
+            setSubmitEnabled(false);
+            try {
+                captcha.widgetId = window.turnstile.render('#captcha', {
+                    sitekey: TURNSTILE_SITE_KEY,
+                    theme: document.documentElement.classList.contains('dark') ? 'dark' : 'light',
+                    callback: onCaptchaSolved,
+                    'expired-callback': onCaptchaInvalid,
+                    'error-callback': onCaptchaInvalid
+                });
+            } catch (e) {
+                // Render threw (bad key, blocked request). Re-enable the button
+                // so the attempt produces a clear message instead of a dead
+                // control; the server rejects logins without a valid token
+                // either way, so nothing is weakened.
+                setSubmitEnabled(true);
+                showError('Could not load the verification challenge. Check your connection and reload.');
+            }
+        }
+
+        function showError(message) {
+            var errEl = document.getElementById('error-msg');
+            if (errEl) errEl.textContent = message;
+        }
+
         function submitLogin(e) {
             e.preventDefault();
             var errEl = document.getElementById('error-msg');
             errEl.textContent = '';
+            if (captcha.enabled && !captcha.solved) {
+                errEl.textContent = 'Please complete the verification challenge.';
+                return;
+            }
             var body = JSON.stringify({
                 email: document.getElementById('email').value,
-                password: document.getElementById('password').value
+                password: document.getElementById('password').value,
+                captcha_token: captcha.enabled ? captchaToken() : null
             });
+            setSubmitEnabled(false);
             fetch('/auth/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -41,21 +124,44 @@
                             localStorage.setItem('token', data.access_token);
                             localStorage.setItem('user', JSON.stringify(data.user));
                         } catch (e) {
+                            // The captcha token was already spent by the server,
+                            // so re-arm the form rather than leaving it disabled.
+                            onCaptchaInvalid();
                             errEl.textContent = 'Signed in, but could not save your session (storage is blocked, e.g. private browsing). Please enable storage and try again.';
                             return;
                         }
                         window.location.href = '/';
                     });
-                } else {
-                    return res.json().then(function(data) {
-                        errEl.textContent = data.message || data.error || 'Login failed';
-                    });
                 }
+                // The token is single-use, so the widget must be re-solved
+                // before another attempt.
+                onCaptchaInvalid();
+                resetCaptcha();
+                return res.json().then(function(data) {
+                    errEl.textContent = data.message || data.error || data.detail || 'Login failed';
+                });
             }).catch(function() {
+                onCaptchaInvalid();
+                resetCaptcha();
                 errEl.textContent = 'Network error';
             });
         }
+
         document.addEventListener('DOMContentLoaded', function() {
+            if (captcha.enabled) {
+                var s = document.createElement('script');
+                s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=onTurnstileLoad';
+                s.async = true;
+                s.defer = true;
+                // If the script never loads (blocked, offline), onload never
+                // fires — re-enable the button so the attempt explains itself
+                // rather than leaving a control that does nothing.
+                s.onerror = function() {
+                    setSubmitEnabled(true);
+                    showError('Could not load the verification challenge. Check your connection and reload.');
+                };
+                document.head.appendChild(s);
+            }
             fetch('/api/public/settings').then(function(r) { return r.json(); }).then(function(d) {
                 if (d.block_registrations) {
                     var el = document.getElementById('register-link');
@@ -63,6 +169,11 @@
                 }
             }).catch(function() {});
         });
+
+        // Global callback invoked by the Turnstile script once it is ready.
+        function onTurnstileLoad() {
+            initCaptcha();
+        }
     </script>
 </head>
 <body class="h-full bg-gray-50 flex items-center justify-center">
@@ -82,9 +193,13 @@
                 <input type="password" id="password" name="password" required autocomplete="current-password"
                     class="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 px-3 py-2 border">
             </div>
+            <!-- Cloudflare Turnstile widget, rendered only when the server has a
+                 captcha configured. The token is read by submitLogin(). -->
+            <div id="captcha" style="display: none;"></div>
+            <input type="hidden" id="captcha-token" name="captcha_token" value="">
             <div id="error-msg" class="text-red-600 text-sm"></div>
-            <button type="submit"
-                class="w-full bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 transition font-medium">
+            <button type="submit" id="submit-btn"
+                class="w-full bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 transition font-medium disabled:opacity-50 disabled:cursor-not-allowed">
                 Sign In
             </button>
         </form>

@@ -116,16 +116,20 @@ fn parse_refresh_cookie(header: &str) -> Option<String> {
 async fn build_full_app() -> (Router, Arc<AppState>) {
     let (state, _temp) = helpers::build_test_state().await;
     helpers::reset_db(&state.db).await;
+    (build_app_with_state(state.clone()).await, state)
+}
 
+/// Same router as [`build_full_app`] but around a caller-provided state, so a
+/// test can exercise page rendering under a non-default configuration.
+async fn build_app_with_state(state: Arc<AppState>) -> Router {
     let state_for_fallback = state.clone();
-    let app = keystone::api_routes()
+    keystone::api_routes()
         .fallback(move |uri: axum::http::Uri, headers: HeaderMap| {
             let state = state_for_fallback.clone();
             async move { ui_fallback(uri, headers, state).await }
         })
         .layer(axum::extract::Extension(state.clone()))
-        .with_state(state.clone());
-    (app, state)
+        .with_state(state)
 }
 
 async fn ui_fallback(uri: axum::http::Uri, headers: HeaderMap, state: Arc<AppState>) -> Response {
@@ -147,7 +151,17 @@ async fn ui_fallback(uri: axum::http::Uri, headers: HeaderMap, state: Arc<AppSta
     }
 
     match path {
-        "/auth/login" | "/login" => HtmlResponse(versioned(LOGIN_HTML)).into_response(),
+        "/auth/login" | "/login" => {
+            // Mirrors main.rs: the captcha site key is substituted at serve time.
+            // main.rs additionally JS-escapes it before substituting.
+            let site_key = state
+                .captcha_service
+                .site_key(state.db.pool())
+                .await
+                .unwrap_or_default();
+            let html = LOGIN_HTML.replace("__TURNSTILE_SITE_KEY__", &site_key);
+            HtmlResponse(versioned(&html)).into_response()
+        }
         "/auth/register" | "/register" => {
             let blocked = AdminSettingRepository::get_bool(state.db.pool(), "block_registrations")
                 .await
@@ -537,6 +551,133 @@ fn test_login_html_has_submit_handler() {
     assert!(
         !html.contains("localStorage.setItem('refresh"),
         "refresh token must never be persisted in JS-accessible storage"
+    );
+}
+
+#[tokio::test]
+async fn test_login_page_hides_captcha_when_not_configured() {
+    let (app, state) = build_full_app().await;
+    assert!(!state.captcha_service.is_enabled(state.db.pool()).await.unwrap());
+
+    let (status, html) = get_page(&app, "/login").await;
+    assert_eq!(status, 200);
+
+    // The placeholder must always be substituted: a literal "__TURNSTILE_SITE_KEY__"
+    // reaching the browser would leave the widget permanently disabled.
+    assert!(
+        !html.contains("__TURNSTILE_SITE_KEY__"),
+        "the captcha site key placeholder must be substituted before serving"
+    );
+    assert!(
+        html.contains("var TURNSTILE_SITE_KEY = \"\";"),
+        "a disabled captcha should render an empty site key so the widget stays off"
+    );
+}
+
+#[tokio::test]
+async fn test_login_page_renders_captcha_widget_when_configured() {
+    let (state, _tmp) =
+        helpers::build_test_state_with_captcha(keystone::config::CaptchaConfig {
+            turnstile_verify_url: "http://127.0.0.1:9/siteverify".to_string(),
+        })
+        .await;
+    helpers::reset_db(&state.db).await;
+    // The keys are admin-managed in the database, exactly as the admin settings
+    // screen writes them.
+    helpers::enable_captcha(&state, "site-key-abc", "secret-key-xyz", true).await;
+    assert!(state.captcha_service.is_enabled(state.db.pool()).await.unwrap());
+    let app = build_app_with_state(state.clone()).await;
+
+    let (status, html) = get_page(&app, "/login").await;
+    assert_eq!(status, 200);
+
+    assert!(
+        !html.contains("__TURNSTILE_SITE_KEY__"),
+        "the captcha site key placeholder must be substituted before serving"
+    );
+    // Only the site key (public by design) reaches the page; the secret must not.
+    assert!(
+        html.contains("var TURNSTILE_SITE_KEY = \"site-key-abc\";"),
+        "the login page should embed the public captcha site key"
+    );
+    assert!(
+        !html.contains("secret-key-xyz"),
+        "the captcha secret key must never be served to the browser"
+    );
+    assert!(
+        html.contains("https://challenges.cloudflare.com/turnstile/v0/api.js"),
+        "the login page should load the Turnstile script"
+    );
+    // The widget starts hidden and is only shown once a site key is present, so
+    // a default install renders exactly the login form it always did.
+    assert!(
+        html.contains("id=\"captcha\" style=\"display: none;\""),
+        "the captcha container should start hidden"
+    );
+}
+
+#[test]
+fn test_admin_page_captcha_settings_ui() {
+    // /admin redirects unauthenticated visitors to the login page, so assert
+    // against the served markup directly.
+    let html = versioned(ADMIN_HTML);
+
+    // The admin screen manages the keys, so it must post to the captcha
+    // settings endpoint rather than the boolean-only /api/admin/settings.
+    assert!(
+        html.contains("/api/admin/settings/captcha"),
+        "the admin page should save captcha keys via the captcha settings endpoint"
+    );
+    assert!(
+        html.contains("captcha_secret_configured"),
+        "the admin page should render the secret-configured indicator"
+    );
+    // The secret input is write-only: it must never be pre-filled from the
+    // server, and must not be a text field that shoulder-surfs a secret.
+    assert!(
+        html.contains("x-model=\"captcha.secretKey\""),
+        "the secret field should be bound to the captcha form state"
+    );
+    assert!(
+        html.contains("id=\"captcha-secret-key\" type=\"password\""),
+        "the secret input must be a password field"
+    );
+    assert!(
+        html.contains("self.captcha.secretKey = '';"),
+        "the secret field must be cleared after saving"
+    );
+    // The admin toggle and "both keys present" are separate server states, so
+    // the UI can warn about a captcha that is switched on but not enforcing.
+    assert!(
+        html.contains("captcha_status") || html.contains("captcha_configured"),
+        "the admin page should distinguish the toggle from key readiness"
+    );
+}
+
+#[test]
+fn test_login_html_captcha_invariants() {
+    let html = versioned(LOGIN_HTML);
+
+    assert!(
+        html.contains("if (!captcha.enabled) return;"),
+        "captcha setup should no-op when no site key is configured"
+    );
+    // The token must travel with the credentials...
+    assert!(
+        html.contains("captcha_token: captcha.enabled ? captchaToken() : null"),
+        "the login request should carry the captcha token"
+    );
+    // ...and be re-solved after every rejected attempt: Turnstile tokens are
+    // single-use, so a stale token would block the retry.
+    assert!(
+        html.contains("resetCaptcha()"),
+        "the widget should be reset after a rejected attempt"
+    );
+    // A widget that fails to load must not silently fall back to an unprotected
+    // login: the button stays disabled until the challenge is solved.
+    assert!(
+        html.contains("setSubmitEnabled(false)"),
+        "the submit button should stay disabled until the challenge is solved"
     );
 }
 

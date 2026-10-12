@@ -13,6 +13,9 @@ pub struct AppState {
     pub jwt_service: crate::utils::auth::jwt::JwtService,
     pub storage: RwLock<crate::storage::StorageRegistry>,
     pub session_service: crate::utils::auth::session::SessionService,
+    /// Cloudflare Turnstile verification for unauthenticated endpoints. A
+    /// no-op when no captcha keys are configured.
+    pub captcha_service: crate::utils::auth::captcha::CaptchaService,
     pub config: crate::config::Settings,
 }
 

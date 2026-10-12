@@ -33,6 +33,10 @@ pub async fn get_stats(
             allow_user_bots: false,
             allow_user_password_change: false,
             allow_user_sharing: true,
+            captcha_site_key: String::new(),
+            captcha_enabled: false,
+            captcha_secret_configured: false,
+            captcha_configured: false,
         });
 
     Ok(Json(AdminStatsDto {

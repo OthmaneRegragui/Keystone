@@ -3,6 +3,10 @@ use crate::error::{AppError, AppResult};
 use crate::models::AdminSetting;
 use sqlx::PgPool;
 
+/// `admin_settings` keys backing the login CAPTCHA.
+pub const CAPTCHA_SITE_KEY: &str = "turnstile_site_key";
+pub const CAPTCHA_SECRET_KEY: &str = "turnstile_secret_key";
+
 pub struct AdminSettingRepository;
 
 impl AdminSettingRepository {
@@ -64,12 +68,53 @@ impl AdminSettingRepository {
         let allow_user_bots = Self::get_bool(pool, "allow_user_bots").await?;
         let allow_user_password_change = Self::get_bool(pool, "allow_user_password_change").await?;
         let allow_user_sharing = Self::get_bool(pool, "allow_user_sharing").await?;
+        let keys = Self::get_captcha_keys(pool).await?;
+        let captcha_enabled = Self::get_bool(pool, "captcha_enabled").await?;
+        let site_key = keys.site_key.trim().to_string();
+        let secret_configured = !keys.secret_key.trim().is_empty();
         Ok(crate::models::PlatformSettings {
             block_registrations: block_reg,
             allow_user_api_keys,
             allow_user_bots,
             allow_user_password_change,
             allow_user_sharing,
+            captcha_site_key: site_key.clone(),
+            captcha_enabled,
+            captcha_secret_configured: secret_configured,
+            captcha_configured: !site_key.is_empty() && secret_configured,
         })
     }
+
+    /// Login CAPTCHA keys, as configured from the admin settings screen.
+    pub async fn get_captcha_keys(pool: &PgPool) -> AppResult<CaptchaKeys> {
+        let site_key = Self::get(pool, CAPTCHA_SITE_KEY).await?.unwrap_or_default();
+        let secret_key = Self::get(pool, CAPTCHA_SECRET_KEY).await?.unwrap_or_default();
+        Ok(CaptchaKeys { site_key, secret_key })
+    }
+
+    /// Persist the login CAPTCHA configuration.
+    ///
+    /// The secret key is write-only: `None` leaves the stored value
+    /// untouched (so the admin UI can round-trip without ever receiving
+    /// it), while `Some("")` clears it.
+    pub async fn set_captcha(
+        pool: &PgPool,
+        enabled: bool,
+        site_key: &str,
+        secret_key: Option<&str>,
+    ) -> AppResult<()> {
+        Self::set(pool, CAPTCHA_SITE_KEY, site_key.trim()).await?;
+        if let Some(secret) = secret_key {
+            Self::set(pool, CAPTCHA_SECRET_KEY, secret.trim()).await?;
+        }
+        Self::set_bool(pool, "captcha_enabled", enabled).await?;
+        Ok(())
+    }
+}
+
+/// Admin-managed Cloudflare Turnstile keys.
+#[derive(Debug, Clone, Default)]
+pub struct CaptchaKeys {
+    pub site_key: String,
+    pub secret_key: String,
 }
