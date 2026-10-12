@@ -408,10 +408,17 @@ pub async fn shared_folder_contents(
     ).await?;
 
     let folder_dtos: Vec<FolderDto> = {
+        // Batch the per-folder counts (2 queries total instead of 2N).
+        let folder_ids: Vec<Uuid> = folders.iter().map(|f| f.id).collect();
+        let file_counts =
+            FolderRepository::count_files_for_folders(state.db.pool(), &folder_ids).await?;
+        let folder_counts =
+            FolderRepository::count_subfolders_for_folders(state.db.pool(), &folder_ids).await?;
         let mut dtos = Vec::new();
         for f in folders {
-            let file_count = FolderRepository::count_files(state.db.pool(), f.id).await?;
-            let folder_count = FolderRepository::count_subfolders(state.db.pool(), f.id).await?;
+            let key = f.id.to_string();
+            let file_count = file_counts.get(&key).copied().unwrap_or(0);
+            let folder_count = folder_counts.get(&key).copied().unwrap_or(0);
             dtos.push(FolderDto {
                 id: f.id,
                 name: f.name,

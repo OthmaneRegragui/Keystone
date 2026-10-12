@@ -312,6 +312,53 @@ impl FolderRepository {
         Ok(result.0)
     }
 
+    /// Count direct (non-deleted) files for many folders in a single query,
+    /// keyed by folder id. Used by folder listings to avoid an N+1: without
+    /// this, listing a folder with N children issued 2N count queries.
+    pub async fn count_files_for_folders(
+        pool: &PgPool,
+        folder_ids: &[Uuid],
+    ) -> AppResult<std::collections::HashMap<String, i64>> {
+        if folder_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let ids: Vec<String> = folder_ids.iter().map(|id| id.to_string()).collect();
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT folder_id, COUNT(*)::bigint FROM user_files \
+             WHERE folder_id = ANY($1) AND deleted_at IS NULL \
+             GROUP BY folder_id",
+        )
+        .bind(&ids)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to count folder files: {e}")))?;
+
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Count direct (non-deleted) subfolders for many folders in a single
+    /// query, keyed by folder id. See `count_files_for_folders`.
+    pub async fn count_subfolders_for_folders(
+        pool: &PgPool,
+        folder_ids: &[Uuid],
+    ) -> AppResult<std::collections::HashMap<String, i64>> {
+        if folder_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let ids: Vec<String> = folder_ids.iter().map(|id| id.to_string()).collect();
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT parent_id, COUNT(*)::bigint FROM user_folders \
+             WHERE parent_id = ANY($1) AND deleted_at IS NULL \
+             GROUP BY parent_id",
+        )
+        .bind(&ids)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to count subfolders: {e}")))?;
+
+        Ok(rows.into_iter().collect())
+    }
+
     /// Build the full path for a folder by traversing the parent chain.
     pub async fn get_path(pool: &PgPool, folder_id: Uuid) -> AppResult<Vec<(Uuid, String)>> {
         let mut path = Vec::new();

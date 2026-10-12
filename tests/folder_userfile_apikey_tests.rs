@@ -391,6 +391,65 @@ async fn test_folder_count_subfolders() {
 }
 
 #[tokio::test]
+async fn test_folder_count_batched_matches_per_folder() {
+    let db = helpers::setup_test_db().await;
+    let pool = db.pool();
+    let user_id = create_test_user(pool).await;
+    let file_id = create_test_file(pool, "hash-batch").await;
+
+    // Two folders: "A" holds 2 files + 1 subfolder, "B" is empty.
+    let folder_a = FolderRepository::create(
+        pool,
+        FolderRecord::new(user_id, "bucket".into(), "A".into(), None),
+    )
+    .await
+    .unwrap();
+    let folder_b = FolderRepository::create(
+        pool,
+        FolderRecord::new(user_id, "bucket".into(), "B".into(), None),
+    )
+    .await
+    .unwrap();
+    FolderRepository::create(
+        pool,
+        FolderRecord::new(user_id, "bucket".into(), "A-sub".into(), Some(folder_a.id)),
+    )
+    .await
+    .unwrap();
+    for name in ["a1.txt", "a2.txt"] {
+        let mut uf =
+            UserFileRecord::new(user_id, file_id, name.into(), None, Some("bucket".into()));
+        uf.folder_id = Some(folder_a.id);
+        UserFileRepository::create(pool, uf).await.unwrap();
+    }
+
+    // Empty input is a cheap no-op.
+    assert!(FolderRepository::count_files_for_folders(pool, &[])
+        .await
+        .unwrap()
+        .is_empty());
+
+    let ids = [folder_a.id, folder_b.id];
+    let files = FolderRepository::count_files_for_folders(pool, &ids).await.unwrap();
+    let subs = FolderRepository::count_subfolders_for_folders(pool, &ids).await.unwrap();
+
+    // Batched results match the single-folder helpers, and absent ids (a folder
+    // with zero rows) are simply missing rather than present as 0.
+    assert_eq!(files.get(&folder_a.id.to_string()).copied().unwrap_or(0), 2);
+    assert_eq!(subs.get(&folder_a.id.to_string()).copied().unwrap_or(0), 1);
+    assert_eq!(files.get(&folder_b.id.to_string()).copied().unwrap_or(0), 0);
+    assert_eq!(subs.get(&folder_b.id.to_string()).copied().unwrap_or(0), 0);
+    assert_eq!(
+        FolderRepository::count_files(pool, folder_a.id).await.unwrap(),
+        2
+    );
+    assert_eq!(
+        FolderRepository::count_subfolders(pool, folder_a.id).await.unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn test_folder_get_path() {
     let db = helpers::setup_test_db().await;
     let pool = db.pool();
