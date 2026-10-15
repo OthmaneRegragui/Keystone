@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Json;
 use crate::error::{AppError, AppResult};
-use crate::db::repos::StoragePathRepository;
+use crate::db::repos::{ConnectionRepository, StorageConfig, StoragePathRepository};
 use tracing::info;
 
 use crate::dto::*;
@@ -66,12 +66,21 @@ pub async fn list_storage_paths(
 ) -> AppResult<Json<Vec<StoragePathDto>>> {
     auth.require_admin()?;
     let paths = StoragePathRepository::list(state.db.pool()).await?;
+    // Resolve each path's assigned connection once, so the DTO can show its name
+    // and type without a query per row.
+    let connections: std::collections::HashMap<String, crate::models::Connection> =
+        ConnectionRepository::list(state.db.pool())
+            .await?
+            .into_iter()
+            .map(|c| (c.id.clone(), c))
+            .collect();
     let mut dtos = Vec::with_capacity(paths.len());
     for sp in paths {
         let file_count = StoragePathRepository::file_count_for_path(state.db.pool(), &sp.path).await.unwrap_or(0);
         let total_size = StoragePathRepository::total_size_for_path(state.db.pool(), &sp.path).await.unwrap_or(0);
         let bucket_count = StoragePathRepository::bucket_count_for_path(state.db.pool(), &sp.path).await.unwrap_or(0);
-        dtos.push(StoragePathDto::from_path(sp, file_count, total_size, bucket_count));
+        let connection = sp.connection_id.as_ref().and_then(|id| connections.get(id));
+        dtos.push(StoragePathDto::from_path(sp, connection, file_count, total_size, bucket_count));
     }
     Ok(Json(dtos))
 }
@@ -95,9 +104,33 @@ pub async fn create_storage_path(
     let base = resolve_env_base(&state)?;
     let path = format!("{}/{}", base, slug);
 
-    let sp = StoragePathRepository::create(state.db.pool(), &body.name, &path).await?;
+    // An assigned connection must exist; a missing one is a client error rather
+    // than a dangling reference.
+    let connection = match body.connection_id.as_deref().filter(|id| !id.is_empty()) {
+        Some(id) => Some(
+            ConnectionRepository::find_by_id(state.db.pool(), id)
+                .await?
+                .ok_or_else(|| AppError::Validation(format!("connection '{id}' not found")))?,
+        ),
+        None => None,
+    };
+    if connection.is_none() && body.delete_local_after_upload {
+        return Err(AppError::Validation(
+            "delete_local_after_upload requires an assigned connection".into(),
+        ));
+    }
+
+    let config = StorageConfig {
+        connection_id: connection.as_ref().map(|c| c.id.clone()),
+        delete_local_after_upload: body.delete_local_after_upload,
+    };
+    let sp = StoragePathRepository::create_with(state.db.pool(), &body.name, &path, config).await?;
+    // A new path can "adopt" buckets that already live under it (their stored
+    // path shares this prefix), so rebuild every backend to pick up the new
+    // ownership. FTP backends connect lazily, so this is a cheap, offline step.
+    state.reload_storage_backends().await?;
     info!("admin {} created storage path '{}' at '{}'", auth.username, sp.name, sp.path);
-    Ok(Json(StoragePathDto::from_path(sp, 0, 0, 0)))
+    Ok(Json(StoragePathDto::from_path(sp, connection.as_ref(), 0, 0, 0)))
 }
 
 pub async fn get_storage_base(
@@ -131,6 +164,9 @@ pub async fn delete_storage_path(
 ) -> AppResult<Json<MessageResponse>> {
     auth.require_admin()?;
     StoragePathRepository::delete(state.db.pool(), &body.id).await?;
+    // Buckets that lived under the removed path fall back to local disk, so
+    // rebuild their backends immediately instead of waiting for a restart.
+    state.reload_storage_backends().await?;
     info!("admin {} deleted storage path '{}'", auth.username, body.id);
     Ok(Json(MessageResponse { message: "storage path deleted".into() }))
 }

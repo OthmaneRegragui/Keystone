@@ -143,7 +143,7 @@ pub async fn reset_db(db: &Database) {
         "TRUNCATE TABLE \
             files, users, api_keys, storage_objects, audit_logs, \
             admin_settings, buckets, user_groups, group_members, group_buckets, \
-            storage_paths, user_folders, user_files, refresh_tokens \
+            connections, storage_paths, user_folders, user_files, refresh_tokens \
          CASCADE",
     )
     .execute(db.pool())
@@ -207,6 +207,15 @@ pub async fn build_test_state_with_captcha(
         }"#).unwrap()
     });
     config.captcha = captcha;
+
+    // Anchor storage-path creation under the throwaway temp dir. Tests must
+    // never write into the environment's real STORAGE_LOCAL_PATHS (which .env
+    // points at a host directory outside the sandbox).
+    config.storage.local_paths = vec![temp_dir
+        .path()
+        .join("paths")
+        .to_string_lossy()
+        .into_owned()];
 
     let state = Arc::new(AppState {
         db,

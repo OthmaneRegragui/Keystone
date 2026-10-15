@@ -16,11 +16,10 @@ use keystone::api::middleware::{
     assign_request_id, catch_panic, rate_limit, request_logging, security_headers, RateLimiter,
 };
 use keystone::db::Database;
-use keystone::db::repos::{AdminSettingRepository, BucketRepository, UserRepository};
+use keystone::db::repos::{AdminSettingRepository, BucketRepository, ConnectionRepository, StoragePathRepository, UserRepository};
 use keystone::error::AppResult;
 use keystone::models::UserRole;
 use keystone::storage::StorageRegistry;
-use keystone::storage::local::LocalFsBackend;
 use keystone::utils::auth::jwt::JwtService;
 use keystone::utils::auth::session::{REFRESH_COOKIE_NAME, SessionService};
 use uuid::Uuid;
@@ -130,14 +129,39 @@ async fn main() {
     // bucket through the admin UI (which registers its storage backend on
     // the fly). Here we only register backends for buckets that already
     // exist in the database, so their files stay reachable across restarts.
+    //
+    // A bucket inherits its backend from the storage path it lives under, and
+    // that path from the connection it assigns, so load the paths and
+    // connections first and resolve each bucket's owner by prefix.
+    let storage_paths = match StoragePathRepository::list(db.pool()).await {
+        Ok(paths) => paths,
+        Err(e) => panic!("failed to list storage paths at startup: {e}"),
+    };
+    let connections: std::collections::HashMap<String, keystone::models::Connection> =
+        match ConnectionRepository::list(db.pool()).await {
+            Ok(conns) => conns.into_iter().map(|c| (c.id.clone(), c)).collect(),
+            Err(e) => panic!("failed to list connections at startup: {e}"),
+        };
     match BucketRepository::list(db.pool()).await {
         Ok(existing) => {
             for b in &existing {
-                let path = std::path::PathBuf::from(&b.path);
-                let backend = LocalFsBackend::new(&path)
-                    .unwrap_or_else(|e| panic!("failed to init storage at '{}': {e}", path.display()));
-                tracing::info!("Storage [{}]: {}", b.name, b.path);
-                storage.register(b.name.clone(), Arc::new(backend));
+                let owning = keystone::storage::find_owning_path(&storage_paths, &b.path);
+                let connection = owning
+                    .and_then(|p| p.connection_id.as_ref())
+                    .and_then(|id| connections.get(id));
+                let backend =
+                    keystone::storage::build_backend(b, owning, connection).unwrap_or_else(|e| {
+                        panic!(
+                            "failed to init storage for bucket '{}' at '{}': {e}",
+                            b.name, b.path
+                        )
+                    });
+                let kind = match connection {
+                    Some(c) => c.connection_type.as_str(),
+                    None => "local",
+                };
+                tracing::info!("Storage [{}]: {} ({})", b.name, b.path, kind);
+                storage.register(b.name.clone(), backend);
             }
         }
         Err(e) => {

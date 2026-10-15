@@ -669,3 +669,238 @@ async fn test_admin_create_bot_api_key() {
     assert_eq!(json["name"], "bot-key");
     assert!(json.get("full_key").is_some());
 }
+
+// ─── Connections + Storage Paths (local + FTP/FTPS) ──────────────────────
+
+/// Create an FTP connection and return its id.
+async fn create_ftp_connection(app: &axum::Router, token: &str, name: &str) -> String {
+    let body = serde_json::json!({
+        "name": name,
+        "connection_type": "ftp",
+        "ftp_host": "ftp.example.com",
+        "ftp_port": 2121,
+        "ftp_username": "user",
+        "ftp_password": "s3cr3t",
+        "ftp_base_path": "/uploads",
+        "ftp_secure": true,
+        "ftp_verify_cert": false,
+        "ftp_passive": true
+    });
+    let resp = helpers::json_post_auth(app, "/api/admin/connections", &body, token).await;
+    assert_eq!(resp.status(), 200);
+    let json = helpers::response_json(resp).await;
+    json["id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn test_admin_create_local_storage_path() {
+    let (app, token, _state, _temp) = setup_admin().await;
+    // A bare name stays a plain local path: no connection is assigned.
+    let body = serde_json::json!({ "name": "Local One" });
+    let resp = helpers::json_post_auth(&app, "/api/admin/paths", &body, &token).await;
+    assert_eq!(resp.status(), 200);
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["connection_id"], serde_json::Value::Null);
+    assert_eq!(json["connection_name"], serde_json::Value::Null);
+    assert_eq!(json["delete_local_after_upload"], false);
+    assert!(json["path"].as_str().unwrap().ends_with("/local-one"));
+}
+
+#[tokio::test]
+async fn test_admin_create_ftp_connection() {
+    let (app, token, _state, _temp) = setup_admin().await;
+    let body = serde_json::json!({
+        "name": "Backup FTP",
+        "connection_type": "ftp",
+        "ftp_host": "ftp.example.com",
+        "ftp_port": 2121,
+        "ftp_username": "user",
+        "ftp_password": "s3cr3t",
+        "ftp_base_path": "/uploads",
+        "ftp_secure": true,
+        "ftp_verify_cert": false,
+        "ftp_passive": true
+    });
+    let resp = helpers::json_post_auth(&app, "/api/admin/connections", &body, &token).await;
+    assert_eq!(resp.status(), 200);
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["connection_type"], "ftp");
+    assert_eq!(json["ftp_host"], "ftp.example.com");
+    assert_eq!(json["ftp_port"], 2121);
+    assert_eq!(json["ftp_username"], "user");
+    assert_eq!(json["ftp_base_path"], "/uploads");
+    assert_eq!(json["ftp_secure"], true);
+    assert_eq!(json["ftp_verify_cert"], false);
+    assert_eq!(json["ftp_password_set"], true);
+
+    // The password is write-only: list must never return the secret itself.
+    let list = helpers::get_auth(&app, "/api/admin/connections", &token).await;
+    assert_eq!(list.status(), 200);
+    let text = helpers::response_text(list).await;
+    assert!(text.contains("ftp.example.com"));
+    assert!(!text.contains("s3cr3t"));
+}
+
+#[tokio::test]
+async fn test_admin_create_ftp_connection_requires_host() {
+    let (app, token, _state, _temp) = setup_admin().await;
+    let body = serde_json::json!({
+        "name": "Bad FTP",
+        "connection_type": "ftp",
+        "ftp_username": "user"
+    });
+    let resp = helpers::json_post_auth(&app, "/api/admin/connections", &body, &token).await;
+    assert_eq!(resp.status(), 422);
+}
+
+#[tokio::test]
+async fn test_admin_create_connection_rejects_unknown_type() {
+    let (app, token, _state, _temp) = setup_admin().await;
+    let body = serde_json::json!({ "name": "Weird", "connection_type": "s3" });
+    let resp = helpers::json_post_auth(&app, "/api/admin/connections", &body, &token).await;
+    assert_eq!(resp.status(), 422);
+}
+
+#[tokio::test]
+async fn test_admin_create_path_assigns_connection() {
+    let (app, token, _state, _temp) = setup_admin().await;
+    let connection_id = create_ftp_connection(&app, &token, "Remote").await;
+
+    let body = serde_json::json!({
+        "name": "Remote Path",
+        "connection_id": connection_id,
+        "delete_local_after_upload": true
+    });
+    let resp = helpers::json_post_auth(&app, "/api/admin/paths", &body, &token).await;
+    assert_eq!(resp.status(), 200);
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["connection_id"], connection_id);
+    assert_eq!(json["connection_name"], "Remote");
+    assert_eq!(json["connection_type"], "ftp");
+    assert_eq!(json["delete_local_after_upload"], true);
+}
+
+#[tokio::test]
+async fn test_admin_create_path_requires_existing_connection() {
+    let (app, token, _state, _temp) = setup_admin().await;
+    let body = serde_json::json!({ "name": "Ghost", "connection_id": "does-not-exist" });
+    let resp = helpers::json_post_auth(&app, "/api/admin/paths", &body, &token).await;
+    assert_eq!(resp.status(), 422);
+}
+
+#[tokio::test]
+async fn test_admin_bucket_under_ftp_path_uses_ftp_backend() {
+    let (app, token, state, _temp) = setup_admin().await;
+    let connection_id = create_ftp_connection(&app, &token, "Remote").await;
+
+    // Create a storage path assigned that connection.
+    let path_body = serde_json::json!({ "name": "FTP Root", "connection_id": connection_id });
+    let resp = helpers::json_post_auth(&app, "/api/admin/paths", &path_body, &token).await;
+    assert_eq!(resp.status(), 200);
+    let path_json = helpers::response_json(resp).await;
+    let base = path_json["path"].as_str().unwrap().to_string();
+
+    // A bucket created under that path inherits its FTP backend. Construction
+    // never touches the network, so this works with no server reachable.
+    let bucket_body = serde_json::json!({ "name": "ftp-bucket", "path": format!("{base}/ftp-bucket") });
+    let resp = helpers::json_post_auth(&app, "/api/admin/buckets", &bucket_body, &token).await;
+    assert_eq!(resp.status(), 200);
+
+    let backend = state.storage.read().await.get("ftp-bucket").unwrap();
+    assert_eq!(backend.scheme(), "ftp");
+}
+
+#[tokio::test]
+async fn test_admin_bucket_outside_ftp_path_stays_local() {
+    let (app, token, state, _temp) = setup_admin().await;
+    let connection_id = create_ftp_connection(&app, &token, "Remote").await;
+
+    // An FTP path that no bucket lives under...
+    let path_body = serde_json::json!({ "name": "FTP Root", "connection_id": connection_id });
+    let resp = helpers::json_post_auth(&app, "/api/admin/paths", &path_body, &token).await;
+    assert_eq!(resp.status(), 200);
+
+    // ...must not affect an unrelated bucket created elsewhere.
+    let bucket_body = serde_json::json!({ "name": "plain", "path": "/tmp/keystone-plain-bucket" });
+    let resp = helpers::json_post_auth(&app, "/api/admin/buckets", &bucket_body, &token).await;
+    assert_eq!(resp.status(), 200);
+
+    let backend = state.storage.read().await.get("plain").unwrap();
+    assert_eq!(backend.scheme(), "file");
+}
+
+#[tokio::test]
+async fn test_admin_delete_connection_unassigns_path() {
+    let (app, token, _state, _temp) = setup_admin().await;
+    let connection_id = create_ftp_connection(&app, &token, "Remote").await;
+
+    let path_body = serde_json::json!({ "name": "FTP Root", "connection_id": connection_id });
+    let resp = helpers::json_post_auth(&app, "/api/admin/paths", &path_body, &token).await;
+    assert_eq!(resp.status(), 200);
+
+    // Deleting the connection leaves the path in place, now on local disk.
+    let del = helpers::delete_auth(
+        &app,
+        "/api/admin/connections",
+        &serde_json::json!({ "id": connection_id }),
+        &token,
+    )
+    .await;
+    assert_eq!(del.status(), 200);
+
+    let list = helpers::get_auth(&app, "/api/admin/paths", &token).await;
+    let json = helpers::response_json(list).await;
+    let path = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "FTP Root")
+        .unwrap();
+    assert_eq!(path["connection_id"], serde_json::Value::Null);
+    assert_eq!(path["connection_name"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn test_admin_check_connection_requires_admin() {
+    let (app, token, _state, _temp) = setup_user().await;
+    let body = serde_json::json!({ "id": "whatever" });
+    let resp = helpers::json_post_auth(&app, "/api/admin/connections/check", &body, &token).await;
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn test_admin_check_connection_unknown_id() {
+    let (app, token, _state, _temp) = setup_admin().await;
+    let body = serde_json::json!({ "id": "does-not-exist" });
+    let resp = helpers::json_post_auth(&app, "/api/admin/connections/check", &body, &token).await;
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn test_admin_check_connection_inline_requires_host() {
+    let (app, token, _state, _temp) = setup_admin().await;
+    // No id and no host: the inline settings are invalid.
+    let body = serde_json::json!({ "connection_type": "ftp", "ftp_username": "user" });
+    let resp = helpers::json_post_auth(&app, "/api/admin/connections/check", &body, &token).await;
+    assert_eq!(resp.status(), 422);
+}
+
+#[tokio::test]
+async fn test_admin_check_connection_reports_failure() {
+    let (app, token, _state, _temp) = setup_admin().await;
+    // Nothing listens on port 1, so the probe fails but still answers 200 with
+    // a reason the UI can display.
+    let body = serde_json::json!({
+        "connection_type": "ftp",
+        "ftp_host": "127.0.0.1",
+        "ftp_port": 1,
+        "ftp_username": "user",
+        "ftp_password": "secret",
+        "ftp_passive": true
+    });
+    let resp = helpers::json_post_auth(&app, "/api/admin/connections/check", &body, &token).await;
+    assert_eq!(resp.status(), 200);
+    let json = helpers::response_json(resp).await;
+    assert_eq!(json["ok"], false);
+    assert!(json["error"].as_str().map(|e| !e.is_empty()).unwrap_or(false));
+}

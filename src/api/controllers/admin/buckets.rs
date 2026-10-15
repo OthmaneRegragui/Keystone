@@ -5,9 +5,9 @@ use axum::Json;
 use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::db::repos::{
-    BucketRepository, FileRepository, StorageObjectRepository, UserFileRepository, UserRepository,
+    BucketRepository, ConnectionRepository, FileRepository, StorageObjectRepository,
+    StoragePathRepository, UserFileRepository, UserRepository,
 };
-use crate::storage::local::LocalFsBackend;
 use crate::utils::traits::StorageBackend;
 use crate::utils::names::validate_component_name;
 use tracing::{info, warn};
@@ -42,6 +42,31 @@ fn validate_bucket_path(path: &str) -> Result<(), String> {
         return Err("path must not contain '..' components".to_string());
     }
     Ok(())
+}
+
+/// Build the storage backend for `bucket` from the storage path that owns it
+/// and that path's assigned connection.
+///
+/// A path assigned an FTP/FTPS connection yields a backend that stages locally
+/// and mirrors to the remote server; anything else (including a bucket under no
+/// configured path) is a plain local-disk backend. Construction never contacts
+/// the network.
+async fn backend_for(
+    state: &AppState,
+    bucket: &crate::models::Bucket,
+) -> AppResult<Arc<dyn StorageBackend>> {
+    let paths = StoragePathRepository::list(state.db.pool()).await?;
+    let owning = crate::storage::find_owning_path(&paths, &bucket.path);
+    let connection = match owning.and_then(|p| p.connection_id.as_deref()) {
+        Some(id) => ConnectionRepository::find_by_id(state.db.pool(), id).await?,
+        None => None,
+    };
+    crate::storage::build_backend(bucket, owning, connection.as_ref()).map_err(|e| {
+        AppError::Internal(format!(
+            "failed to build storage for bucket '{}': {e}",
+            bucket.name
+        ))
+    })
 }
 
 pub async fn list_buckets(
@@ -85,17 +110,12 @@ pub async fn create_bucket(
         AppError::Validation(format!("invalid bucket path: {e}"))
     })?;
     let bucket = BucketRepository::create(state.db.pool(), body.name.trim(), &body.path).await?;
-    let path_clone = body.path.clone();
-    let name_clone = body.name.clone();
-    let backend = std::sync::Arc::new(
-        LocalFsBackend::new(&path_clone)
-            .map_err(|e| AppError::Internal(format!("failed to create storage at '{}': {e}", path_clone)))?
-    );
+    let backend = backend_for(&state, &bucket).await?;
     {
         let mut storage = state.storage.write().await;
-        storage.register(name_clone.clone(), backend);
+        storage.register(bucket.name.clone(), backend);
     }
-    info!("admin {} created bucket '{}' at '{}'", auth.username, bucket.name, path_clone);
+    info!("admin {} created bucket '{}' at '{}'", auth.username, bucket.name, body.path);
     Ok(Json(BucketDto::from_bucket(bucket, 0, 0, 0, 0, 0)))
 }
 
@@ -136,10 +156,9 @@ pub async fn update_bucket(
     let name_changed = body.original_name != body.name;
     BucketRepository::update(state.db.pool(), &body.original_name, &body.name, &body.path, body.visible_to_users, body.is_active, body.storage_limit).await?;
     if path_changed || name_changed {
-        let backend = std::sync::Arc::new(
-            LocalFsBackend::new(&body.path)
-                .map_err(|e| AppError::Internal(format!("failed to create storage at '{}': {e}", body.path)))?
-        );
+        let bucket = BucketRepository::find_by_name(state.db.pool(), &body.name).await?
+            .ok_or_else(|| AppError::NotFound(format!("bucket '{}' not found", body.name)))?;
+        let backend = backend_for(&state, &bucket).await?;
         let mut storage = state.storage.write().await;
         // Remove old entry if name changed
         if name_changed {
@@ -320,11 +339,11 @@ pub async fn change_bucket_path(
             .ok_or_else(|| AppError::Internal(format!("storage backend '{}' not registered in memory", body.bucket_name)))?
     };
 
-    // Create the new backend at the target path
-    let new_backend = std::sync::Arc::new(
-        LocalFsBackend::new(&new_path)
-            .map_err(|e| AppError::Internal(format!("failed to create storage at '{new_path}': {e}")))?
-    );
+    // Destination backend for the target path (plain local, or FTP/FTPS when
+    // `new_path` falls under an FTP storage path).
+    let mut probe = bucket.clone();
+    probe.path = new_path.clone();
+    let new_backend = backend_for(&state, &probe).await?;
 
     // Move each file: read from old backend, write to new backend
     let mut moved = 0u64;

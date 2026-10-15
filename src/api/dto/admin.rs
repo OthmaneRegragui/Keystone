@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
-use crate::models::{BotPathRule, Bucket, PlatformSettings, StoragePath, UserGroup};
+use crate::error::{AppError, AppResult};
+use crate::models::{BotPathRule, Bucket, Connection, PlatformSettings, StoragePath, UserGroup};
 use serde::{Deserialize, Serialize};
 
 fn default_true() -> bool { true }
@@ -452,6 +453,164 @@ pub struct AdminBotPathRequest {
     pub id: String,
 }
 
+// ─── Connections ─────────────────────────────────────────────
+
+/// A saved remote-server connection, with its type-specific settings flattened
+/// for the admin UI. Secrets (the FTP password) are write-only: only whether one
+/// is set is ever returned.
+#[derive(Debug, Serialize)]
+pub struct ConnectionDto {
+    pub id: String,
+    pub name: String,
+    pub connection_type: String,
+    pub created_at: DateTime<Utc>,
+    pub ftp_host: Option<String>,
+    pub ftp_port: i32,
+    pub ftp_username: Option<String>,
+    pub ftp_base_path: String,
+    pub ftp_secure: bool,
+    pub ftp_passive: bool,
+    pub ftp_verify_cert: bool,
+    /// Whether an FTP password is stored. The password itself is write-only and
+    /// is never returned by any endpoint.
+    pub ftp_password_set: bool,
+}
+
+impl ConnectionDto {
+    pub fn from_connection(c: Connection) -> Self {
+        let ftp = if c.is_ftp() {
+            serde_json::from_str::<crate::storage::ftp::FtpConfig>(&c.config).ok()
+        } else {
+            None
+        };
+        match ftp {
+            Some(cfg) => Self {
+                id: c.id,
+                name: c.name,
+                connection_type: c.connection_type,
+                created_at: c.created_at,
+                ftp_host: Some(cfg.host),
+                ftp_port: cfg.port as i32,
+                ftp_username: Some(cfg.username),
+                ftp_base_path: cfg.base_path,
+                ftp_secure: cfg.secure,
+                ftp_passive: cfg.passive,
+                ftp_verify_cert: cfg.verify_cert,
+                ftp_password_set: !cfg.password.is_empty(),
+            },
+            None => Self {
+                id: c.id,
+                name: c.name,
+                connection_type: c.connection_type,
+                created_at: c.created_at,
+                ftp_host: None,
+                ftp_port: 21,
+                ftp_username: None,
+                ftp_base_path: String::new(),
+                ftp_secure: false,
+                ftp_passive: true,
+                ftp_verify_cert: true,
+                ftp_password_set: false,
+            },
+        }
+    }
+}
+
+/// Create a saved connection. Every field is optional; only the fields relevant
+/// to `connection_type` are read. The FTP password is write-only.
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct CreateConnectionRequest {
+    pub name: String,
+    /// Backend kind, e.g. `"ftp"`.
+    pub connection_type: String,
+    pub ftp_host: Option<String>,
+    pub ftp_port: Option<i32>,
+    pub ftp_username: Option<String>,
+    pub ftp_password: Option<String>,
+    pub ftp_base_path: Option<String>,
+    pub ftp_secure: Option<bool>,
+    pub ftp_passive: Option<bool>,
+    pub ftp_verify_cert: Option<bool>,
+}
+
+impl CreateConnectionRequest {
+    /// Validate this request and resolve it into `(connection_type, config_json)`.
+    pub fn to_config(&self) -> AppResult<(String, String)> {
+        let connection_type = self.connection_type.trim().to_ascii_lowercase();
+        match connection_type.as_str() {
+            "ftp" => {
+                let host = self.ftp_host.as_deref().unwrap_or("").trim().to_string();
+                if host.is_empty() {
+                    return Err(AppError::Validation("FTP host is required".into()));
+                }
+                if host.contains('\0') {
+                    return Err(AppError::Validation(
+                        "FTP host contains invalid characters".into(),
+                    ));
+                }
+                let port = self.ftp_port.unwrap_or(21);
+                if !(1..=65535).contains(&port) {
+                    return Err(AppError::Validation(
+                        "FTP port must be between 1 and 65535".into(),
+                    ));
+                }
+                let username = self.ftp_username.as_deref().unwrap_or("").trim().to_string();
+                if username.is_empty() {
+                    return Err(AppError::Validation("FTP username is required".into()));
+                }
+                let base_path = self.ftp_base_path.clone().unwrap_or_default();
+                if base_path.contains('\0') {
+                    return Err(AppError::Validation(
+                        "FTP base path contains invalid characters".into(),
+                    ));
+                }
+                let config = crate::storage::ftp::FtpConfig {
+                    host,
+                    port: port as u16,
+                    username,
+                    password: self.ftp_password.clone().unwrap_or_default(),
+                    base_path,
+                    secure: self.ftp_secure.unwrap_or(false),
+                    passive: self.ftp_passive.unwrap_or(true),
+                    verify_cert: self.ftp_verify_cert.unwrap_or(true),
+                };
+                let json = serde_json::to_string(&config).map_err(|e| {
+                    AppError::Internal(format!("failed to serialise FTP connection: {e}"))
+                })?;
+                Ok((connection_type, json))
+            }
+            other => Err(AppError::Validation(format!(
+                "unknown connection type '{other}'"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteConnectionRequest {
+    pub id: String,
+}
+
+/// Probe a connection: either a saved one (`id`) or the inline settings of one
+/// that has not been saved yet. A saved connection is probed server-side with
+/// its stored password (which is never sent to the client).
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct CheckConnectionRequest {
+    /// Saved connection to probe. When absent, `connection` is used instead.
+    pub id: Option<String>,
+    #[serde(flatten)]
+    pub connection: CreateConnectionRequest,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConnectionCheckDto {
+    pub ok: bool,
+    /// Human-readable failure reason when `ok` is false.
+    pub error: Option<String>,
+}
+
 // ─── Storage Paths ───────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -463,10 +622,23 @@ pub struct StoragePathDto {
     pub total_size: i64,
     pub bucket_count: i64,
     pub created_at: DateTime<Utc>,
+    /// Saved connection this path mirrors to, if any. `None` = plain local disk.
+    pub connection_id: Option<String>,
+    /// Name of the assigned connection, resolved at read time.
+    pub connection_name: Option<String>,
+    /// Backend kind of the assigned connection, e.g. `"ftp"`.
+    pub connection_type: Option<String>,
+    pub delete_local_after_upload: bool,
 }
 
 impl StoragePathDto {
-    pub fn from_path(sp: StoragePath, file_count: i64, total_size: i64, bucket_count: i64) -> Self {
+    pub fn from_path(
+        sp: StoragePath,
+        connection: Option<&Connection>,
+        file_count: i64,
+        total_size: i64,
+        bucket_count: i64,
+    ) -> Self {
         Self {
             id: sp.id,
             name: sp.name,
@@ -475,6 +647,10 @@ impl StoragePathDto {
             total_size,
             bucket_count,
             created_at: sp.created_at,
+            connection_id: sp.connection_id,
+            connection_name: connection.map(|c| c.name.clone()),
+            connection_type: connection.map(|c| c.connection_type.clone()),
+            delete_local_after_upload: sp.delete_local_after_upload,
         }
     }
 }
@@ -488,6 +664,12 @@ pub struct StorageBaseDto {
 #[derive(Debug, Deserialize)]
 pub struct CreateStoragePathRequest {
     pub name: String,
+    /// Saved connection to assign, or `None` for a plain local path.
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    /// Remove the staged local copy once a remote upload succeeds.
+    #[serde(default)]
+    pub delete_local_after_upload: bool,
 }
 
 #[derive(Debug, Deserialize)]
