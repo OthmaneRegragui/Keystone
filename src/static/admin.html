@@ -138,7 +138,11 @@
             }
             return {
                 tab: initialTab,
-                stats: { total_users: 0, total_files: 0, total_buckets: 0, total_groups: 0, block_registrations: true, active_user_files: 0, active_user_files_size: 0, deleted_user_files: 0, deleted_user_files_size: 0 },
+                stats: { total_users: 0, total_files: 0, total_buckets: 0, total_groups: 0, block_registrations: true, active_user_files: 0, active_user_files_size: 0, deleted_user_files: 0, deleted_user_files_size: 0, orphaned_physical_files: 0, orphaned_physical_files_size: 0 },
+                systemStats: { app: { cpu_usage_percent: 0, memory_used_bytes: 0 }, database: null },
+                systemStatsLoading: false,
+                systemStatsError: '',
+                overviewRefreshing: false,
                 orphans: { total: 0, total_size_bytes: 0, files: [] },
                 orphansLoading: false,
                 orphansError: '',
@@ -215,6 +219,7 @@
                 init: function() {
                     var self = this;
                     self.loadStats();
+                    self.loadSystemStats();
                     self.loadOrphans();
                     self.loadBots();
                     self.loadSettings();
@@ -232,6 +237,54 @@
                         .then(function(r) { return r.json(); })
                         .then(function(d) { self.stats = d; })
                         .catch(function() {});
+                },
+                loadSystemStats: function() {
+                    var self = this;
+                    self.systemStatsLoading = true;
+                    self.systemStatsError = '';
+                    authFetch('/api/admin/system/stats')
+                        .then(function(r) {
+                            if (!r.ok) throw new Error('unavailable');
+                            return r.json();
+                        })
+                        .then(function(d) {
+                            self.systemStats = d || self.systemStats;
+                            self.systemStatsLoading = false;
+                        })
+                        .catch(function() {
+                            self.systemStatsLoading = false;
+                            self.systemStatsError = 'Unavailable';
+                        });
+                },
+                // Reload everything the Overview tab displays.
+                refreshOverview: function() {
+                    var self = this;
+                    if (self.overviewRefreshing) return;
+                    self.overviewRefreshing = true;
+                    self.loadStats();
+                    self.loadSystemStats();
+                    self.loadOrphans();
+                    self.loadBots();
+                    self.loadBackends();
+                    self.loadStoragePaths();
+                    self.loadSettings();
+                    // The loaders above are fire-and-forget; give them a moment
+                    // so the spinner reads as work rather than a flicker.
+                    setTimeout(function() { self.overviewRefreshing = false; }, 600);
+                },
+                get fileComposition() {
+                    var active = this.stats.active_user_files_size || 0;
+                    var deleted = this.stats.deleted_user_files_size || 0;
+                    var orphaned = this.stats.orphaned_physical_files_size || 0;
+                    return { active: active, deleted: deleted, orphaned: orphaned, total: active + deleted + orphaned };
+                },
+                compositionPct: function(which) {
+                    var total = this.fileComposition.total;
+                    if (!total) return 0;
+                    return Math.round((this.fileComposition[which] / total) * 100);
+                },
+                get remotePathCount() {
+                    return this.storagePaths.filter(function(p) { return !!p.connection_id; }).length;
                 },
                 loadOrphans: function() {
                     var self = this;
@@ -1175,102 +1228,216 @@
 
                 <!-- Overview Tab -->
                 <div x-show="tab==='overview'" class="space-y-6">
-                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
-                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-                            <p class="text-sm text-gray-500">Total Users</p>
-                            <p class="text-3xl font-bold text-gray-900 mt-1" x-text="stats.total_users"></p>
+                    <!-- Header -->
+                    <div class="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                            <h2 class="text-xl font-semibold text-gray-900">Overview</h2>
+                            <p class="text-sm text-gray-500 mt-0.5">Platform usage and health at a glance.</p>
                         </div>
-                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-                            <p class="text-sm text-gray-500">Buckets</p>
-                            <p class="text-3xl font-bold text-gray-900 mt-1" x-text="stats.total_buckets"></p>
+                        <button x-on:click="refreshOverview()" :disabled="overviewRefreshing"
+                            class="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 transition disabled:opacity-50">
+                            <svg class="w-4 h-4" :class="overviewRefreshing ? 'animate-spin' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                            <span x-text="overviewRefreshing ? 'Refreshing...' : 'Refresh'"></span>
+                        </button>
+                    </div>
+
+                    <!-- KPI cards -->
+                    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+                        <div x-on:click="setTab('users')" class="cursor-pointer bg-white rounded-xl shadow-sm border border-gray-200 p-5 hover:border-indigo-300 hover:shadow-md transition group">
+                            <div class="flex items-start justify-between">
+                                <span class="w-10 h-10 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/></svg>
+                                </span>
+                                <svg class="w-4 h-4 text-gray-300 group-hover:text-indigo-400 transition" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                            </div>
+                            <p class="text-2xl font-bold text-gray-900 mt-4" x-text="stats.total_users"></p>
+                            <p class="text-sm text-gray-500 mt-0.5">Users</p>
                         </div>
-                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-                            <p class="text-sm text-gray-500">Groups</p>
-                            <p class="text-3xl font-bold text-gray-900 mt-1" x-text="stats.total_groups"></p>
+                        <div x-on:click="setTab('buckets')" class="cursor-pointer bg-white rounded-xl shadow-sm border border-gray-200 p-5 hover:border-sky-300 hover:shadow-md transition group">
+                            <div class="flex items-start justify-between">
+                                <span class="w-10 h-10 rounded-lg bg-sky-50 text-sky-600 flex items-center justify-center">
+                                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+                                </span>
+                                <svg class="w-4 h-4 text-gray-300 group-hover:text-sky-400 transition" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                            </div>
+                            <p class="text-2xl font-bold text-gray-900 mt-4" x-text="stats.total_buckets"></p>
+                            <p class="text-sm text-gray-500 mt-0.5">Buckets</p>
                         </div>
-                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-                            <p class="text-sm text-gray-500">Physical Files</p>
-                            <p class="text-3xl font-bold text-gray-900 mt-1" x-text="stats.total_files"></p>
-                            <p class="text-xs text-gray-400 mt-1">Content-addressed blobs</p>
+                        <div x-on:click="setTab('groups')" class="cursor-pointer bg-white rounded-xl shadow-sm border border-gray-200 p-5 hover:border-violet-300 hover:shadow-md transition group">
+                            <div class="flex items-start justify-between">
+                                <span class="w-10 h-10 rounded-lg bg-violet-50 text-violet-600 flex items-center justify-center">
+                                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                                </span>
+                                <svg class="w-4 h-4 text-gray-300 group-hover:text-violet-400 transition" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                            </div>
+                            <p class="text-2xl font-bold text-gray-900 mt-4" x-text="stats.total_groups"></p>
+                            <p class="text-sm text-gray-500 mt-0.5">Groups</p>
+                        </div>
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+                            <div class="flex items-start justify-between">
+                                <span class="w-10 h-10 rounded-lg bg-slate-100 text-slate-600 flex items-center justify-center">
+                                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"/></svg>
+                                </span>
+                            </div>
+                            <p class="text-2xl font-bold text-gray-900 mt-4" x-text="stats.total_files"></p>
+                            <p class="text-sm text-gray-500 mt-0.5">Physical Files</p>
+                            <p class="text-xs text-gray-400 mt-0.5">Content-addressed blobs</p>
                         </div>
                     </div>
-                    <!-- File Stats -->
-                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6">
+
+                    <!-- Storage usage + system health -->
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
                         <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-                            <div class="flex items-center gap-2 mb-2">
-                                <div class="w-2.5 h-2.5 bg-green-500 rounded-full"></div>
-                                <p class="text-sm font-medium text-gray-600">Active Files</p>
+                            <div class="flex items-baseline justify-between">
+                                <h3 class="text-lg font-semibold text-gray-900">Storage Usage</h3>
+                                <span class="text-sm text-gray-500" x-text="fmtBytes(fileComposition.total) + ' on disk'"></span>
                             </div>
-                            <p class="text-3xl font-bold text-gray-900 mt-1" x-text="stats.active_user_files"></p>
-                            <p class="text-sm text-gray-500 mt-1" x-text="fmtBytes(stats.active_user_files_size)"></p>
-                        </div>
-                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-                            <div class="flex items-center gap-2 mb-2">
-                                <div class="w-2.5 h-2.5 bg-amber-500 rounded-full"></div>
-                                <p class="text-sm font-medium text-gray-600">Deleted by Users</p>
+                            <div class="flex h-2.5 rounded-full overflow-hidden bg-gray-100 mt-4">
+                                <div class="bg-emerald-500 transition-all" :style="'width:' + compositionPct('active') + '%'"></div>
+                                <div class="bg-amber-400 transition-all" :style="'width:' + compositionPct('deleted') + '%'"></div>
+                                <div class="bg-red-500 transition-all" :style="'width:' + compositionPct('orphaned') + '%'"></div>
                             </div>
-                            <p class="text-3xl font-bold text-amber-600 mt-1" x-text="stats.deleted_user_files"></p>
-                            <p class="text-sm text-gray-500 mt-1" x-text="fmtBytes(stats.deleted_user_files_size) + ' still on disk'"></p>
-                        </div>
-                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-                            <div class="flex items-center gap-2 mb-2">
-                                <div class="w-2.5 h-2.5 bg-red-500 rounded-full"></div>
-                                <p class="text-sm font-medium text-gray-600">Orphaned (Wasted)</p>
-                            </div>
-                            <p class="text-3xl font-bold text-red-600 mt-1" x-text="stats.orphaned_physical_files"></p>
-                            <p class="text-sm text-gray-500 mt-1" x-text="fmtBytes(stats.orphaned_physical_files_size) + ' unused'"></p>
-                            <p class="text-xs text-red-400 mt-1">No user can access these files</p>
-                        </div>
-                    </div>
-                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-                        <div class="flex flex-wrap items-center justify-between gap-3">
-                            <div>
-                                <h3 class="text-lg font-semibold text-gray-900">Orphaned Files</h3>
-                                <p class="text-sm text-gray-500 mt-0.5" x-text="orphans.total + ' files · ' + fmtBytes(orphans.total_size_bytes) + ' of wasted space'"></p>
-                            </div>
-                            <div class="flex items-center gap-2">
-                                <a href="/orphans"
-                                    class="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 transition">
-                                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
-                                    View All Files
-                                </a>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-                        <div class="flex flex-wrap items-center justify-between gap-3">
-                            <div>
-                                <h3 class="text-lg font-semibold text-gray-900">Bots</h3>
-                                <p class="text-sm text-gray-500 mt-0.5" x-text="bots.length + ' bot account(s) with scoped API keys'"></p>
-                            </div>
-                            <div class="flex items-center gap-2">
-                                <a href="/bots"
-                                    class="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 transition">
-                                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9z"/></svg>
-                                    Manage Bots
-                                </a>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-                        <h3 class="text-lg font-semibold text-gray-900 mb-4">Platform Info</h3>
-                        <dl class="grid grid-cols-2 gap-4 text-sm">
-                            <div>
-                                <dt class="text-gray-500">Registrations</dt>
-                                <dd class="mt-1 font-medium" x-text="stats.block_registrations ? 'Blocked' : 'Open'"></dd>
-                            </div>
-                        </dl>
-                    </div>
-                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-                        <h3 class="text-lg font-semibold text-gray-900 mb-4">Storage Backends</h3>
-                        <div class="space-y-2">
-                            <template x-for="b in backends" :key="b">
-                                <div class="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
-                                    <div class="w-2 h-2 bg-green-500 rounded-full"></div>
-                                    <span class="text-sm font-medium text-gray-900" x-text="b"></span>
+                            <div class="mt-4 space-y-3">
+                                <div class="flex items-center justify-between text-sm">
+                                    <span class="flex items-center gap-2 text-gray-600"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>Active</span>
+                                    <span><span class="font-medium text-gray-900" x-text="stats.active_user_files.toLocaleString()"></span><span class="text-gray-400 ml-2" x-text="fmtBytes(stats.active_user_files_size)"></span></span>
                                 </div>
-                            </template>
-                            <p x-show="backends.length === 0" class="text-sm text-gray-400">No backends loaded</p>
+                                <div class="flex items-center justify-between text-sm">
+                                    <span class="flex items-center gap-2 text-gray-600"><span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>Deleted by users</span>
+                                    <span><span class="font-medium text-gray-900" x-text="stats.deleted_user_files.toLocaleString()"></span><span class="text-gray-400 ml-2" x-text="fmtBytes(stats.deleted_user_files_size)"></span></span>
+                                </div>
+                                <div class="flex items-center justify-between text-sm">
+                                    <span class="flex items-center gap-2 text-red-600"><span class="w-2.5 h-2.5 rounded-full bg-red-500"></span>Orphaned (wasted)</span>
+                                    <span><span class="font-medium text-gray-900" x-text="stats.orphaned_physical_files.toLocaleString()"></span><span class="text-gray-400 ml-2" x-text="fmtBytes(stats.orphaned_physical_files_size)"></span></span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                            <div class="flex items-center justify-between">
+                                <h3 class="text-lg font-semibold text-gray-900">System Health</h3>
+                                <span x-show="systemStatsLoading" x-cloak class="text-xs text-gray-400">Loading...</span>
+                                <span x-show="systemStatsError" x-cloak class="text-xs text-red-500" x-text="systemStatsError"></span>
+                            </div>
+                            <div class="grid grid-cols-2 gap-x-6 gap-y-4 mt-4">
+                                <div>
+                                    <p class="text-xs text-gray-500">App CPU</p>
+                                    <p class="text-lg font-semibold text-gray-900 mt-0.5" x-text="systemStats.app.cpu_usage_percent.toFixed(1) + '%'"></p>
+                                </div>
+                                <div>
+                                    <p class="text-xs text-gray-500">App Memory</p>
+                                    <p class="text-lg font-semibold text-gray-900 mt-0.5" x-text="fmtBytes(systemStats.app.memory_used_bytes)"></p>
+                                </div>
+                                <div>
+                                    <p class="text-xs text-gray-500">Database Size</p>
+                                    <p class="text-lg font-semibold text-gray-900 mt-0.5" x-text="systemStats.database ? fmtBytes(systemStats.database.size_bytes) : '-'"></p>
+                                </div>
+                                <div>
+                                    <p class="text-xs text-gray-500">DB Connections</p>
+                                    <p class="text-lg font-semibold text-gray-900 mt-0.5" x-text="systemStats.database ? (systemStats.database.active_connections + ' / ' + systemStats.database.total_connections) : '-'"></p>
+                                </div>
+                                <div>
+                                    <p class="text-xs text-gray-500">Cache Hit Rate</p>
+                                    <p class="text-lg font-semibold text-gray-900 mt-0.5" x-text="systemStats.database ? systemStats.database.cache_hit_percent.toFixed(1) + '%' : '-'"></p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Attention -->
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 flex items-start gap-4">
+                            <span class="w-10 h-10 shrink-0 rounded-lg bg-red-50 text-red-600 flex items-center justify-center">
+                                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.054 0 1.698-1.15 1.166-2.06l-6.928-12a1.333 1.333 0 00-2.312 0l-6.928 12c-.532.91.112 2.06 1.166 2.06z"/></svg>
+                            </span>
+                            <div class="flex-1 min-w-0">
+                                <h3 class="text-base font-semibold text-gray-900">Orphaned Files</h3>
+                                <p class="text-sm text-gray-500 mt-0.5" x-text="orphans.total + ' file(s), ' + fmtBytes(orphans.total_size_bytes) + ' wasted'"></p>
+                                <a href="/orphans" class="inline-flex items-center gap-1.5 mt-3 text-sm font-medium text-indigo-600 hover:text-indigo-800">
+                                    Review files
+                                    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                                </a>
+                            </div>
+                        </div>
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6 flex items-start gap-4">
+                            <span class="w-10 h-10 shrink-0 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center">
+                                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9z"/></svg>
+                            </span>
+                            <div class="flex-1 min-w-0">
+                                <h3 class="text-base font-semibold text-gray-900">Bots</h3>
+                                <p class="text-sm text-gray-500 mt-0.5" x-text="bots.length + ' bot account(s) with scoped API keys'"></p>
+                                <a href="/bots" class="inline-flex items-center gap-1.5 mt-3 text-sm font-medium text-indigo-600 hover:text-indigo-800">
+                                    Manage bots
+                                    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Platform + storage -->
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                            <div class="flex items-center justify-between mb-4">
+                                <h3 class="text-lg font-semibold text-gray-900">Platform</h3>
+                                <button x-on:click="setTab('settings')" class="text-sm font-medium text-indigo-600 hover:text-indigo-800">Settings</button>
+                            </div>
+                            <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+                                <div class="flex items-center justify-between">
+                                    <dt class="text-gray-500">Registrations</dt>
+                                    <dd class="font-medium" :class="settings.block_registrations ? 'text-red-600' : 'text-emerald-600'" x-text="settings.block_registrations ? 'Blocked' : 'Open'"></dd>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <dt class="text-gray-500">CAPTCHA</dt>
+                                    <dd class="font-medium" :class="settings.captcha_enabled ? 'text-emerald-600' : 'text-gray-500'" x-text="settings.captcha_enabled ? 'Enabled' : 'Off'"></dd>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <dt class="text-gray-500">User API keys</dt>
+                                    <dd class="font-medium" :class="settings.allow_user_api_keys ? 'text-emerald-600' : 'text-gray-500'" x-text="settings.allow_user_api_keys ? 'Allowed' : 'Disabled'"></dd>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <dt class="text-gray-500">User bots</dt>
+                                    <dd class="font-medium" :class="settings.allow_user_bots ? 'text-emerald-600' : 'text-gray-500'" x-text="settings.allow_user_bots ? 'Allowed' : 'Disabled'"></dd>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <dt class="text-gray-500">Sharing</dt>
+                                    <dd class="font-medium" :class="settings.allow_user_sharing ? 'text-emerald-600' : 'text-gray-500'" x-text="settings.allow_user_sharing ? 'Allowed' : 'Disabled'"></dd>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <dt class="text-gray-500">Password change</dt>
+                                    <dd class="font-medium" :class="settings.allow_user_password_change ? 'text-emerald-600' : 'text-gray-500'" x-text="settings.allow_user_password_change ? 'Allowed' : 'Disabled'"></dd>
+                                </div>
+                            </dl>
+                        </div>
+
+                        <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                            <div class="flex items-center justify-between mb-4">
+                                <h3 class="text-lg font-semibold text-gray-900">Storage</h3>
+                                <button x-on:click="setTab('paths')" class="text-sm font-medium text-indigo-600 hover:text-indigo-800">Manage paths</button>
+                            </div>
+                            <div class="grid grid-cols-3 gap-4 mb-5">
+                                <div>
+                                    <p class="text-xs text-gray-500">Paths</p>
+                                    <p class="text-xl font-bold text-gray-900 mt-0.5" x-text="storagePaths.length"></p>
+                                </div>
+                                <div>
+                                    <p class="text-xs text-gray-500">Remote</p>
+                                    <p class="text-xl font-bold text-gray-900 mt-0.5" x-text="remotePathCount"></p>
+                                </div>
+                                <div>
+                                    <p class="text-xs text-gray-500">Buckets</p>
+                                    <p class="text-xl font-bold text-gray-900 mt-0.5" x-text="stats.total_buckets"></p>
+                                </div>
+                            </div>
+                            <p class="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">Active backends</p>
+                            <div class="flex flex-wrap gap-2">
+                                <template x-for="b in backends" :key="b">
+                                    <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-gray-100 text-xs font-mono text-gray-700">
+                                        <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                                        <span x-text="b"></span>
+                                    </span>
+                                </template>
+                                <span x-show="backends.length === 0" class="text-sm text-gray-400">No backends loaded</span>
+                            </div>
                         </div>
                     </div>
                 </div>
