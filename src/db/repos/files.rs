@@ -13,9 +13,15 @@ impl FileRepository {
         let now = Utc::now().to_rfc3339();
         let id = record.id.to_string();
 
-        sqlx::query(
+        // `ON CONFLICT DO NOTHING` makes the insert race-safe: two concurrent
+        // uploads of identical content both miss `find_by_hash`, but only one
+        // wins the unique `blake3_hash` index. The loser reuses the winner's
+        // physical row instead of creating a duplicate (and a second
+        // `storage_objects` row pointing at the same blob).
+        let inserted = sqlx::query(
             r#"INSERT INTO files (id, blake3_hash, original_name, mime_type, size, ref_count, created_at, updated_at)
-               VALUES ($1, $2, $3, $4, $5, 1, $6, $6)"#,
+               VALUES ($1, $2, $3, $4, $5, 1, $6, $6)
+               ON CONFLICT (blake3_hash) DO NOTHING"#,
         )
         .bind(&id)
         .bind(&record.blake3_hash)
@@ -25,11 +31,20 @@ impl FileRepository {
         .bind(&now)
         .execute(pool)
         .await
-        .map_err(|e| AppError::Internal(format!("failed to insert file: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("failed to insert file: {e}")))?
+        .rows_affected();
 
-        Self::find_by_id(pool, Uuid::parse_str(&id).unwrap())
+        if inserted == 1 {
+            return Self::find_by_id(pool, record.id)
+                .await?
+                .ok_or_else(|| AppError::Internal("file not found after insert".to_string()));
+        }
+
+        Self::find_by_hash(pool, &record.blake3_hash)
             .await?
-            .ok_or_else(|| AppError::Internal("file not found after insert".to_string()))
+            .ok_or_else(|| {
+                AppError::Internal("file insert conflicted but no row found".to_string())
+            })
     }
 
     pub async fn find_by_id(pool: &PgPool, id: Uuid) -> AppResult<Option<File>> {

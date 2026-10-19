@@ -58,6 +58,35 @@ async fn test_find_by_hash() {
     assert_eq!(found.unwrap().original_name, "duplicate.txt");
 }
 
+/// Uploading identical content twice must reuse a single physical `files` row
+/// (unique `blake3_hash` index + `ON CONFLICT DO NOTHING`) instead of inserting
+/// a duplicate that a later GC could orphan, deleting a blob another user still
+/// references.
+#[tokio::test]
+async fn test_create_same_hash_reuses_existing_row() {
+    let db = helpers::setup_reset_db().await;
+    let pool = db.pool();
+
+    let first = FileRepository::create(
+        pool,
+        FileRecord::new("dup_hash_race".to_string(), "a.txt".to_string(), None, 10),
+    )
+    .await
+    .expect("first create");
+
+    let second = FileRepository::create(
+        pool,
+        FileRecord::new("dup_hash_race".to_string(), "b.txt".to_string(), None, 10),
+    )
+    .await
+    .expect("second create");
+
+    assert_eq!(
+        first.id, second.id,
+        "same content must resolve to one physical row"
+    );
+}
+
 #[tokio::test]
 async fn test_list_files() {
     let db = helpers::setup_reset_db().await;

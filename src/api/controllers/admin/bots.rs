@@ -254,7 +254,7 @@ pub async fn create_bot(
     )
     .await?;
 
-    let bot = BotRepository::create(
+    let bot = match BotRepository::create(
         state.db.pool(),
         CreateBotData {
             user_id: owner_id,
@@ -270,7 +270,16 @@ pub async fn create_bot(
             upload_limit_bytes: body.upload_limit_bytes,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(bot) => bot,
+        Err(e) => {
+            // Never leave an orphaned bot key behind: with no `bots` row it
+            // would authenticate as an unrestricted user key.
+            let _ = ApiKeyRepository::delete(state.db.pool(), api_key.id).await;
+            return Err(e);
+        }
+    };
 
     info!("user {} created bot '{}' for user {}", auth.username, body.name, owner_id);
 
@@ -353,7 +362,10 @@ pub async fn delete_bot(
     }
     .ok_or_else(|| AppError::NotFound("bot not found".into()))?;
 
-    let _ = ApiKeyRepository::delete(state.db.pool(), bot.key_id).await;
+    // Delete the key first and propagate failure. Deleting the bot while
+    // leaving its key behind would turn the key into an unrestricted user key
+    // (see `AuthUser::from_api_key`).
+    ApiKeyRepository::delete(state.db.pool(), bot.key_id).await?;
     BotRepository::delete(state.db.pool(), bot.id).await?;
 
     info!("user {} deleted bot '{}'", auth.username, bot.name);

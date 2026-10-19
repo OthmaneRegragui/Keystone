@@ -75,6 +75,8 @@ fn build_auth_response(
 
 pub async fn register(
     State(state): State<Arc<AppState>>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> AppResult<(HeaderMap, Json<AuthResponse>)> {
     // Normalize before validation so " Bob@X.com " and "bob@x.com" are the
@@ -92,6 +94,23 @@ pub async fn register(
 
     crate::utils::names::validate_username(&body.username)
         .map_err(AppError::Validation)?;
+
+    // Verify the captcha (when configured) before any expensive work, so
+    // unauthenticated bots cannot use registration as a free Argon2/DB oracle.
+    // The token is single-use, so the register page re-solves the widget after
+    // every rejected attempt (see static/register.html).
+    let captcha = state.captcha_service.load(state.db.pool()).await?;
+    if captcha.is_active() {
+        let remote_ip = crate::api::middleware::rate_limit::resolve_client_ip(
+            state.config.rate_limit.trust_proxy_headers,
+            &connect_info,
+            &headers,
+        );
+        state
+            .captcha_service
+            .enforce_state(&captcha, body.captcha_token.as_deref(), remote_ip)
+            .await?;
+    }
 
     let block = AdminSettingRepository::get_bool(state.db.pool(), "block_registrations")
         .await
@@ -304,7 +323,8 @@ pub async fn forgot_password(
 ) -> AppResult<Json<MessageResponse>> {
     // Always return the same response, whether user exists or not
     if body.email.len() <= 320 {
-        if let Ok(Some(user)) = UserRepository::find_by_email(state.db.pool(), &body.email).await {
+        let email = body.email.trim().to_lowercase();
+        if let Ok(Some(user)) = UserRepository::find_by_email(state.db.pool(), &email).await {
             // TODO: Generate and store a proper reset token, send email
             info!("password reset requested for user_id={}", user.id);
         } else {

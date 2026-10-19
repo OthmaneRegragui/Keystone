@@ -110,7 +110,7 @@
                     if (!self.currentPassword || !self.newPassword) return;
                     var token = null;
                     try { token = localStorage.getItem('token'); } catch (e) {}
-                    fetch('/api/auth/change-password', {
+                    fetch('/auth/change-password', {
                         method: 'POST',
                         headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
                         body: JSON.stringify({ current_password: self.currentPassword, new_password: self.newPassword })

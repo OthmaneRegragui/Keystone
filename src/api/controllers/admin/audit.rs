@@ -396,8 +396,9 @@ async fn query_totals(pool: &PgPool) -> AppResult<AuditTotals> {
 /// GET /api/admin/audit
 pub async fn run_audit(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
 ) -> AppResult<Json<AuditReport>> {
+    user.require_admin()?;
     let pool = state.db.pool();
 
     let mut issues = audit_database(pool).await?;

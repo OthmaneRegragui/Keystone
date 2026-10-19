@@ -421,7 +421,7 @@ pub async fn upload(
     let file = if let Some(ref existing) = existing_physical {
         existing.clone()
     } else {
-        // New unique content - store blob and create file record
+        // New (to us) content - store the blob and create the physical record.
         let storage_key = format!("{}/{}/{}", &hash[..2], &hash[2..4], hash);
         backend
             .put(&storage_key, data.clone())
@@ -429,7 +429,15 @@ pub async fn upload(
             .map_err(|e| AppError::Storage(e.to_string()))?;
 
         let record = FileRecord::new(hash, storage_key.clone(), mime_type.clone(), data.len() as i64);
+        let record_id = record.id;
         let file = FileRepository::create(state.db.pool(), record).await?;
+
+        // If a concurrent upload created the same physical file first, our
+        // insert was a no-op and this is effectively a dedup hit: account the
+        // new reference exactly like the `existing_physical` branch below.
+        if file.id != record_id {
+            FileRepository::update_ref_count(state.db.pool(), file.id, 1).await?;
+        }
 
         let storage_data = CreateStorageObjectData {
             file_id: file.id,
@@ -1147,6 +1155,17 @@ pub async fn move_file(
     )
     .await?;
 
+    // Folder shares materialise a per-file row when the folder is shared, so a
+    // file moved out of a shared folder would otherwise keep the recipient's
+    // access. Revoke the file's shares; a file that stays inside a shared folder
+    // keeps working access via the ancestor-folder check in
+    // `sharing::download_shared_file`.
+    let _ = ShareRepository::delete_by_user_file_ids(
+        state.db.pool(),
+        &[user_file.id.to_string()],
+    )
+    .await;
+
     Ok(Json(MessageResponse {
         message: "file moved".into(),
     }))
@@ -1445,7 +1464,17 @@ pub async fn batch_move(
                 match UserFileRepository::update_bucket_and_folder(
                     state.db.pool(), uf.id, Some(target.to_string()), body.folder_id
                 ).await {
-                    Ok(true) => success += 1,
+                    Ok(true) => {
+                        // See `move_file`: drop materialised shares so a file
+                        // moved out of a shared folder loses the recipient's
+                        // access (ancestor checks preserve legitimate access).
+                        let _ = ShareRepository::delete_by_user_file_ids(
+                            state.db.pool(),
+                            &[uf.id.to_string()],
+                        )
+                        .await;
+                        success += 1
+                    }
                     Ok(false) => { failed += 1; errors.push(format!("{}: not found", uf.original_name)); }
                     Err(e) => { failed += 1; errors.push(format!("{}: {}", uf.original_name, e)); }
                 }
@@ -2469,7 +2498,7 @@ pub async fn delete_folder(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<MessageResponse>> {
     auth_user.require_scope("files:delete")?;
-    auth_user.require_bot_capability(BotCapability::Upload)?;
+    auth_user.require_bot_capability(BotCapability::Delete)?;
     let folder = FolderRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, id)
         .await?
         .ok_or_else(|| AppError::NotFound("folder not found".into()))?;
@@ -2609,6 +2638,27 @@ pub async fn move_folder(
     }
 
     FolderRepository::move_folder(state.db.pool(), folder.id, body.folder_id).await?;
+
+    // Shares are materialised per folder/file at share time, so a folder moved
+    // out of a shared tree must not keep the recipients' access. Revoke the
+    // subtree's shares; items that remain under a shared ancestor keep access
+    // via the ancestor-folder checks in the sharing handlers.
+    {
+        let all_folder_ids = FolderRepository::list_descendant_ids(state.db.pool(), folder.id)
+            .await
+            .unwrap_or_default();
+        let mut share_folder_ids = vec![folder.id.to_string()];
+        share_folder_ids.extend(all_folder_ids.iter().map(|id| id.to_string()));
+        let _ = ShareRepository::delete_by_folder_ids(state.db.pool(), &share_folder_ids).await;
+        let file_ids = UserFileRepository::list_ids_in_folders(
+            state.db.pool(),
+            auth_user.user_id,
+            &share_folder_ids,
+        )
+        .await
+        .unwrap_or_default();
+        let _ = ShareRepository::delete_by_user_file_ids(state.db.pool(), &file_ids).await;
+    }
 
     let target = match body.folder_id {
         Some(_) => "moved",

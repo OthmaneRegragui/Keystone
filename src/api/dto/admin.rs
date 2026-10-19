@@ -544,7 +544,10 @@ impl CreateConnectionRequest {
                 if host.is_empty() {
                     return Err(AppError::Validation("FTP host is required".into()));
                 }
-                if host.contains('\0') {
+                // Reject every control character (not just NUL): CR/LF in a
+                // value that is written verbatim into the FTP command stream
+                // would allow protocol/command injection.
+                if host.chars().any(|c| c.is_control()) {
                     return Err(AppError::Validation(
                         "FTP host contains invalid characters".into(),
                     ));
@@ -559,8 +562,16 @@ impl CreateConnectionRequest {
                 if username.is_empty() {
                     return Err(AppError::Validation("FTP username is required".into()));
                 }
+                let password = self.ftp_password.clone().unwrap_or_default();
+                if username.chars().any(|c| c.is_control())
+                    || password.chars().any(|c| c.is_control())
+                {
+                    return Err(AppError::Validation(
+                        "FTP credentials contain invalid characters".into(),
+                    ));
+                }
                 let base_path = self.ftp_base_path.clone().unwrap_or_default();
-                if base_path.contains('\0') {
+                if base_path.chars().any(|c| c.is_control()) {
                     return Err(AppError::Validation(
                         "FTP base path contains invalid characters".into(),
                     ));
@@ -569,7 +580,7 @@ impl CreateConnectionRequest {
                     host,
                     port: port as u16,
                     username,
-                    password: self.ftp_password.clone().unwrap_or_default(),
+                    password,
                     base_path,
                     secure: self.ftp_secure.unwrap_or(false),
                     passive: self.ftp_passive.unwrap_or(true),

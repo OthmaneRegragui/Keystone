@@ -67,6 +67,27 @@ async fn run_gc_cycle(
             .map_err(|e| format!("failed to query storage objects for file {}: {}", file.id, e))?;
 
         for obj in &storage_objects {
+            // Safety net: never delete a blob that another live `files` row
+            // still references at the same path (defends against a historical
+            // duplicate-row race). That other row is GC'd on its own schedule.
+            let others = StorageObjectRepository::count_other_files_for_path(
+                pool,
+                &obj.storage_path,
+                file.id,
+            )
+            .await
+            .unwrap_or(0);
+            if others > 0 {
+                warn!(
+                    "skipping blob '{}' on backend '{}': still referenced by {} other file(s)",
+                    obj.storage_path, obj.backend, others
+                );
+                if let Err(e) = StorageObjectRepository::delete(pool, obj.id).await {
+                    warn!("failed to delete storage object record {}: {}", obj.id, e);
+                }
+                continue;
+            }
+
             if let Some(backend) = storage.get(&obj.backend) {
                 match backend.delete(&obj.storage_path).await {
                     Ok(true) => {

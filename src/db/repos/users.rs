@@ -33,7 +33,9 @@ impl UserRepository {
         .await
         .map_err(|e| {
             if crate::db::is_unique_violation(&e) {
-                AppError::Conflict(format!("user with username '{}' or email '{}' already exists", data.username, data.email))
+                // Deliberately generic: echoing which field collided (and its
+                // value) lets the register endpoint enumerate usernames/emails.
+                AppError::Conflict("username or email is already taken".into())
             } else {
                 AppError::Internal(format!("failed to insert user: {e}"))
             }
@@ -95,7 +97,9 @@ impl UserRepository {
         .await
         .map_err(|e| {
             if crate::db::is_unique_violation(&e) {
-                AppError::Conflict(format!("user with username '{}' or email '{}' already exists", data.username, data.email))
+                // Deliberately generic: echoing which field collided (and its
+                // value) lets the register endpoint enumerate usernames/emails.
+                AppError::Conflict("username or email is already taken".into())
             } else {
                 AppError::Internal(format!("failed to insert user: {e}"))
             }

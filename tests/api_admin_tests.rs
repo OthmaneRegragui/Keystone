@@ -45,6 +45,29 @@ async fn test_admin_stats_returns_data() {
     assert!(json.get("total_groups").is_some());
 }
 
+// ─── Audit ───────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_audit_requires_authentication() {
+    let (app, _token, _state, _temp) = setup_user().await;
+    let resp = helpers::get_no_auth(&app, "/api/admin/audit").await;
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn test_audit_requires_admin() {
+    let (app, token, _state, _temp) = setup_user().await;
+    let resp = helpers::get_auth(&app, "/api/admin/audit", &token).await;
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn test_audit_returns_report_for_admin() {
+    let (app, token, _state, _temp) = setup_admin().await;
+    let resp = helpers::get_auth(&app, "/api/admin/audit", &token).await;
+    assert_eq!(resp.status(), 200);
+}
+
 #[tokio::test]
 async fn test_system_stats_requires_authentication() {
     let (app, _token, _state, _temp) = setup_user().await;
@@ -668,6 +691,52 @@ async fn test_admin_create_bot_api_key() {
     let json = helpers::response_json(resp).await;
     assert_eq!(json["name"], "bot-key");
     assert!(json.get("full_key").is_some());
+}
+
+/// An API key owned by an admin must NOT inherit admin authority unless it
+/// carries the `admin` scope: a narrow key authenticates as its owner but is
+/// rejected by `require_admin()` on every admin route.
+#[tokio::test]
+async fn test_admin_api_key_without_admin_scope_is_forbidden() {
+    let (app, token, state, _temp) = setup_admin().await;
+    let (uid, _, _, _) =
+        helpers::create_test_user(&state.db, UserRole::Admin, "password123").await;
+
+    let body = serde_json::json!({
+        "user_id": uid.to_string(),
+        "name": "narrow-key",
+        "scopes": ["files:read"],
+        "expires_in_days": 30
+    });
+    let resp = helpers::json_post_auth(&app, "/api/admin/api-keys", &body, &token).await;
+    assert_eq!(resp.status(), 200);
+    let json = helpers::response_json(resp).await;
+    let key = json["full_key"].as_str().unwrap().to_string();
+
+    let resp = helpers::get_auth(&app, "/api/admin/stats", &key).await;
+    assert_eq!(resp.status(), 403);
+}
+
+/// The same admin-owned key with the `admin` scope is allowed through.
+#[tokio::test]
+async fn test_admin_api_key_with_admin_scope_is_allowed() {
+    let (app, token, state, _temp) = setup_admin().await;
+    let (uid, _, _, _) =
+        helpers::create_test_user(&state.db, UserRole::Admin, "password123").await;
+
+    let body = serde_json::json!({
+        "user_id": uid.to_string(),
+        "name": "full-key",
+        "scopes": ["admin"],
+        "expires_in_days": 30
+    });
+    let resp = helpers::json_post_auth(&app, "/api/admin/api-keys", &body, &token).await;
+    assert_eq!(resp.status(), 200);
+    let json = helpers::response_json(resp).await;
+    let key = json["full_key"].as_str().unwrap().to_string();
+
+    let resp = helpers::get_auth(&app, "/api/admin/stats", &key).await;
+    assert_eq!(resp.status(), 200);
 }
 
 // ─── Connections + Storage Paths (local + FTP/FTPS) ──────────────────────

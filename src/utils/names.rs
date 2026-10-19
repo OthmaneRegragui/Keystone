@@ -79,8 +79,15 @@ pub fn validate_component_name(name: &str) -> Result<(), String> {
         return Err("name cannot end with a space or a dot".to_string());
     }
 
-    // 6. Windows reserved device names (with or without an extension).
-    let stem = name.split('.').next().unwrap_or("");
+    // 6. Windows reserved device names (with or without an extension). Windows
+    //    strips trailing spaces/dots from the stem before resolving the name, so
+    //    "con .txt" would still resolve to the CON device; normalize the stem the
+    //    same way before comparing.
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches([' ', '.']);
     const RESERVED: &[&str] = &[
         "CON", "PRN", "AUX", "NUL",
         "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",

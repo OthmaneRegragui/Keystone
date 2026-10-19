@@ -19,7 +19,8 @@ use axum::response::Response;
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' \
     https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; \
     media-src 'self' blob:; connect-src 'self' https://challenges.cloudflare.com; \
-    frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+    frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; \
+    form-action 'self'";
 
 // HSTS is only meaningful — and only honored by browsers — over HTTPS, so it
 // is emitted only in production, where the deployment is expected to run
@@ -32,10 +33,15 @@ pub async fn security_headers(req: Request<Body>, next: Next) -> Response {
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
 
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
-    );
+    // Only set the app-wide CSP when the handler did not already provide one.
+    // Handlers that serve user content inline (e.g. the sandboxed policy for
+    // raw files) install a stricter policy that must not be overwritten.
+    if !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+        );
+    }
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),

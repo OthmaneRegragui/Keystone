@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 use axum::http::StatusCode;
@@ -7,7 +8,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::Router;
 use tokio::net::TcpListener;
 use axum::middleware as axum_mw;
-use axum::http::{Method, HeaderValue, header};
+use axum::http::{header, HeaderName, HeaderValue, Method};
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -200,9 +201,16 @@ async fn main() {
         .filter_map(|m| m.parse().ok())
         .collect();
 
+    let cors_headers: Vec<HeaderName> = settings.cors.allowed_headers
+        .iter()
+        .filter_map(|h| h.parse().ok())
+        .collect();
+
     let cors = CorsLayer::new()
         .allow_origin(cors_origins)
         .allow_methods(cors_methods)
+        .allow_headers(cors_headers)
+        .max_age(Duration::from_secs(settings.cors.max_age_secs))
         .allow_credentials(settings.cors.allow_credentials);
 
     // Per-IP rate limiter, honoring RateLimitConfig. Applied to every route
@@ -337,7 +345,18 @@ async fn ui_handler(
             if blocked {
                 Redirect::to("/login").into_response()
             } else {
-                HtmlResponse(versioned(REGISTER_HTML)).into_response()
+                // Same captcha-site-key injection as the login page so the
+                // register form can render the Turnstile widget when enabled.
+                let site_key = state
+                    .captcha_service
+                    .site_key(state.db.pool())
+                    .await
+                    .unwrap_or_default();
+                let html = REGISTER_HTML.replace(
+                    TURNSTILE_SITE_KEY_PLACEHOLDER,
+                    &js_string_escape(&site_key),
+                );
+                HtmlResponse(versioned(&html)).into_response()
             }
         }
         "/setup" => {

@@ -39,9 +39,11 @@ pub async fn share_item(
 
     // Check sharing permission
     if !auth_user.is_admin() {
+        // Propagate a settings-read failure instead of defaulting to "allowed":
+        // fail closed, so a database hiccup cannot silently re-enable sharing
+        // that an administrator disabled.
         let global_allowed = AdminSettingRepository::get_bool(state.db.pool(), "allow_user_sharing")
-            .await
-            .unwrap_or(true);
+            .await?;
         if !global_allowed {
             return Err(AppError::Forbidden("sharing is disabled by administrator".into()));
         }

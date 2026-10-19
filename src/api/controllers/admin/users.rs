@@ -95,11 +95,14 @@ pub async fn create_user(
     }
     let password_hash = hash_password(&body.password)?;
     let role: UserRole = body.role.parse().map_err(|_| AppError::BadRequest("invalid role".into()))?;
+    // Normalize the address the same way registration/login do, so a
+    // case-variant cannot bypass the case-insensitive uniqueness rule.
+    let email = body.email.trim().to_lowercase();
     let user = UserRepository::create(
         state.db.pool(),
         crate::db::rows::CreateUserData {
             username: body.username,
-            email: body.email,
+            email,
             password_hash,
             role,
             storage_quota: 0,
@@ -136,7 +139,10 @@ pub async fn update_user(
     auth.require_admin()?;
     let uid = Uuid::parse_str(&body.id).map_err(|_| AppError::BadRequest("invalid user id".into()))?;
 
-    if let Some(email) = body.email.as_deref() {
+    // Normalize the address like registration/login do (case-insensitive
+    // uniqueness); reject an invalid one before touching the database.
+    let email = body.email.as_deref().map(|e| e.trim().to_lowercase());
+    if let Some(ref email) = email {
         if !email.validate_email() {
             return Err(AppError::Validation("invalid email address".into()));
         }
@@ -176,7 +182,7 @@ pub async fn update_user(
     UserRepository::update_user(
         state.db.pool(),
         uid,
-        body.email.as_deref(),
+        email.as_deref(),
         role_str,
         password_hash.as_deref(),
     )

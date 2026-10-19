@@ -12,8 +12,11 @@ impl StorageObjectRepository {
         let id = Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
 
+        // Idempotent per `(file_id, backend)`: a concurrent upload of the same
+        // content written to the same backend must not create a second row.
         sqlx::query(
-            "INSERT INTO storage_objects (id, file_id, backend, storage_path, created_at) VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO storage_objects (id, file_id, backend, storage_path, created_at) VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (file_id, backend) DO NOTHING",
         )
         .bind(&id)
         .bind(data.file_id.to_string())
@@ -25,15 +28,39 @@ impl StorageObjectRepository {
         .map_err(|e| AppError::Internal(format!("failed to insert storage object: {e}")))?;
 
         let row = sqlx::query_as::<_, StorageObjectRow>(
-            "SELECT * FROM storage_objects WHERE id = $1",
+            "SELECT * FROM storage_objects WHERE file_id = $1 AND backend = $2",
         )
-        .bind(&id)
+        .bind(data.file_id.to_string())
+        .bind(&data.backend)
         .fetch_optional(pool)
         .await
         .map_err(|e| AppError::Internal(format!("failed to fetch storage object: {e}")))?
         .ok_or_else(|| AppError::Internal("storage object not found after insert".to_string()))?;
 
         Ok(StorageObject::from(row))
+    }
+
+    /// Number of *other* physical files with a live reference that point at the
+    /// same storage path. GC uses this as a safety net so a blob is never
+    /// deleted while another `files` row still references it.
+    pub async fn count_other_files_for_path(
+        pool: &PgPool,
+        storage_path: &str,
+        exclude_file_id: Uuid,
+    ) -> AppResult<i64> {
+        let (count,): (i64,) = sqlx::query_as(
+            r#"SELECT COUNT(*)::BIGINT
+               FROM storage_objects so
+               JOIN files f ON f.id = so.file_id
+               WHERE so.storage_path = $1 AND so.file_id <> $2 AND f.ref_count > 0"#,
+        )
+        .bind(storage_path)
+        .bind(exclude_file_id.to_string())
+        .fetch_one(pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to count other files for path: {e}")))?;
+
+        Ok(count)
     }
 
     pub async fn find_by_file_id(

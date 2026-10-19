@@ -70,8 +70,15 @@ impl AuthUser {
     }
 
     /// Shorthand for `require_role(UserRole::Admin)`.
+    ///
+    /// In addition to the admin role, API-key-authenticated requests must carry
+    /// the `admin` scope. Without this an API key minted for narrow automation
+    /// (e.g. `files:read`) would still act as a full administrator, because the
+    /// key resolves to its owner's role. JWT/UI sessions (`scopes == None`) are
+    /// unaffected.
     pub fn require_admin(&self) -> AppResult<()> {
-        self.require_role(UserRole::Admin)
+        self.require_role(UserRole::Admin)?;
+        self.require_scope("admin")
     }
 
     /// Enforce an API-key scope. JWT-authenticated (UI) users are unaffected
@@ -232,6 +239,17 @@ impl AuthUser {
         // narrowed by the bot's restrictions (buckets, folders, files,
         // capabilities, upload cap).
         let bot = BotRepository::find_by_key_id(state.db.pool(), api_key.id).await?;
+
+        // Fail closed on an orphaned bot key. A bot's restrictions are applied
+        // only when its `bots` row resolves; if the row is gone (deleted while
+        // the key outlived it, or a failed cleanup) the key would otherwise
+        // silently become an unrestricted key with the owner's full access. Bot
+        // keys are identifiable by their `bot_` prefix (see `create_bot`).
+        if bot.is_none() && api_key.key_prefix.starts_with("bot_") {
+            return Err(AppError::Unauthorized(
+                "bot key is no longer associated with a bot".into(),
+            ));
+        }
 
         Ok(AuthUser {
             user_id: user.id,
