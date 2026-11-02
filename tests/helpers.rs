@@ -222,7 +222,8 @@ pub async fn build_test_state_with_captcha(
         jwt_service,
         storage: RwLock::new(storage),
         session_service,
-        captcha_service: CaptchaService::new(&config.captcha),
+        captcha_service: CaptchaService::new(&config.captcha, &config.security.encryption_token),
+        secrets: keystone::utils::secrets::Secrets::from_token(&config.security.encryption_token),
         config,
     });
 

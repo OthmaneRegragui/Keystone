@@ -8,8 +8,9 @@ use axum::response::Response;
 // `script-src 'self' 'unsafe-inline' 'unsafe-eval'` and
 // `style-src 'self' 'unsafe-inline'` are required because the bundled UI ships
 // inline <script>/<style> blocks, self-hosted vendor assets, and Alpine.js,
-// which compiles its `x-` directives with eval at runtime. Everything else is
-// locked down.
+// which compiles its `x-` directives with eval at runtime. Removing the eval
+// allowance requires switching to Alpine's CSP build and pre-registering every
+// component; until then this is a deliberate, documented gap.
 //
 // `https://challenges.cloudflare.com` (Cloudflare Turnstile, the optional login
 // CAPTCHA) is the one external origin allowed, and only in the three directives

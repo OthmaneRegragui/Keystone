@@ -488,6 +488,7 @@ fn build_rustls_connector(verify: bool) -> AppResult<AsyncRustlsConnector> {
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         builder.with_root_certificates(roots).with_no_client_auth()
     } else {
+        tracing::warn!("FTP/FTPS connection configured with certificate verification disabled - this is insecure");
         builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoCertVerifier::new(&provider)))

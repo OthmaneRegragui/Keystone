@@ -35,6 +35,10 @@ pub async fn create_connection(
     }
 
     let (connection_type, config) = body.to_config()?;
+    // Encrypt the FTP password inside the stored JSON. The envelope is
+    // transparent to `FtpConfig`'s serde: every reader decrypts the password
+    // field before use (see `storage::build_backend` and `check_connection`).
+    let config = encrypt_config_password(&state, &config)?;
     let connection = ConnectionRepository::create(
         state.db.pool(),
         body.name.trim(),
@@ -72,7 +76,7 @@ pub async fn check_connection(
                     connection.connection_type
                 )));
             }
-            serde_json::from_str(&connection.config).map_err(|e| {
+            serde_json::from_str::<crate::storage::ftp::FtpConfig>(&decrypt_config_password(&state, &connection.config)?).map_err(|e| {
                 AppError::Internal(format!(
                     "connection '{}' has invalid settings: {e}",
                     connection.name
@@ -80,6 +84,8 @@ pub async fn check_connection(
             })?
         }
         None => {
+            // Inline settings from the request body: never persisted, so they
+            // carry a plaintext password by definition. No decryption needed.
             let (_, json) = body.connection.to_config()?;
             serde_json::from_str(&json).map_err(|e| {
                 AppError::Internal(format!("failed to build connection settings: {e}"))
@@ -123,4 +129,37 @@ pub async fn delete_connection(
     Ok(Json(MessageResponse {
         message: "connection deleted".into(),
     }))
+}
+
+/// Replace the plaintext FTP password inside a serialized `FtpConfig` JSON with
+/// its encrypted envelope before the config is written to `connections.config`.
+/// Other connection types (a local passthrough) have no password and keep
+/// their JSON untouched.
+fn encrypt_config_password(state: &AppState, config_json: &str) -> AppResult<String> {
+    let mut value: serde_json::Value = serde_json::from_str(config_json)
+        .map_err(|e| AppError::Internal(format!("connection settings are not valid JSON: {e}")))?;
+    if let Some(password) = value.get("password").and_then(|p| p.as_str()) {
+        let encrypted = state.secrets.encrypt(password)?;
+        value["password"] = serde_json::Value::String(encrypted);
+    }
+    serde_json::to_string(&value)
+        .map_err(|e| AppError::Internal(format!("failed to serialise connection settings: {e}")))
+}
+
+/// Decrypt the FTP password envelope inside a stored config JSON before the
+/// config is used to open a connection. Legacy plaintext values pass through.
+fn decrypt_config_password(state: &AppState, config_json: &str) -> AppResult<String> {
+    let mut value: serde_json::Value = serde_json::from_str(config_json)
+        .map_err(|e| AppError::Internal(format!("connection settings are not valid JSON: {e}")))?;
+    let enveloped = value
+        .get("password")
+        .and_then(|p| p.as_str())
+        .is_some_and(|p| p.starts_with(crate::utils::secrets::ENVELOPE_PREFIX));
+    if enveloped {
+        let password = value.get("password").and_then(|p| p.as_str()).unwrap_or("");
+        let decrypted = state.secrets.decrypt(password)?;
+        value["password"] = serde_json::Value::String(decrypted);
+    }
+    serde_json::to_string(&value)
+        .map_err(|e| AppError::Internal(format!("failed to serialise connection settings: {e}")))
 }

@@ -422,13 +422,13 @@ pub async fn upload(
         existing.clone()
     } else {
         // New (to us) content - store the blob and create the physical record.
-        let storage_key = format!("{}/{}/{}", &hash[..2], &hash[2..4], hash);
+        let storage_key = format!("{}/{}/{}", &hash[..2], &hash[2..4], &hash);
         backend
             .put(&storage_key, data.clone())
             .await
             .map_err(|e| AppError::Storage(e.to_string()))?;
 
-        let record = FileRecord::new(hash, storage_key.clone(), mime_type.clone(), data.len() as i64);
+        let record = FileRecord::new(hash.clone(), storage_key.clone(), mime_type.clone(), data.len() as i64);
         let record_id = record.id;
         let file = FileRepository::create(state.db.pool(), record).await?;
 
@@ -547,55 +547,8 @@ pub async fn upload(
         }
     }
 
-    // A new user_files entry will be created below, so now the physical file's
-    // ref_count may be incremented (dedup path).
-    if let Some(ref existing) = existing_physical {
-        FileRepository::update_ref_count(state.db.pool(), existing.id, 1).await?;
-    }
-
-    // Create a user_files entry so this user has their own reference to the file.
-    // Check for soft-deleted row with the same key first — restore it instead of inserting.
-    let user_file = if let Some(deleted_uf) = UserFileRepository::find_deleted_by_user_file_and_name(
-        state.db.pool(),
-        auth_user.user_id,
-        file.id,
-        &original_name,
-    ).await? {
-        // Restore the soft-deleted entry. If no bucket was specified, keep the
-        // row's previous bucket rather than clearing it to NULL.
-        let restored_bucket = bucket_name.clone().or(deleted_uf.bucket_name.clone());
-        UserFileRepository::restore(state.db.pool(), deleted_uf.id).await?;
-        // Update bucket/folder if they changed
-        if deleted_uf.bucket_name != restored_bucket || deleted_uf.folder_id != resolved_folder_id {
-            UserFileRepository::update_bucket_and_folder(
-                state.db.pool(),
-                deleted_uf.id,
-                restored_bucket,
-                resolved_folder_id,
-            ).await?;
-        }
-        // Refresh the MIME type if the client sent a more specific one.
-        if let Some(ref mime) = mime_type {
-            if deleted_uf.mime_type.as_deref() != Some(mime.as_str()) {
-                UserFileRepository::update_mime_type(state.db.pool(), deleted_uf.id, mime).await?;
-            }
-        }
-        // Re-fetch to get updated data
-        UserFileRepository::find_by_id(state.db.pool(), deleted_uf.id)
-            .await?
-            .unwrap_or(deleted_uf)
-    } else {
-        // New row. Record the effective bucket (explicit or defaulted) so the
-        // file is correctly attributed for access checks and bucket limits.
-        let mut user_file_record =
-            UserFileRecord::new(auth_user.user_id, file.id, original_name, mime_type.clone(), Some(backend_name));
-        user_file_record.folder_id = resolved_folder_id;
-        UserFileRepository::create(state.db.pool(), user_file_record).await?
-    };
-
-    // Charge quota atomically. The pre-check above is only a fast-fail for UX;
-    // this conditional UPDATE is the authoritative gate, so concurrent uploads
-    // cannot together exceed the quota (lost-update).
+    // Charge quota atomically BEFORE creating user_files/ref_count so we don't
+    // leave stored files uncharged on failure (prevents disk exhaustion).
     if !UserRepository::charge_storage(
         state.db.pool(),
         auth_user.user_id,
@@ -606,7 +559,99 @@ pub async fn upload(
         return Err(AppError::BadRequest("storage quota exceeded".into()));
     }
 
-    charge_bot_upload(&state, &auth_user, data.len() as i64).await?;
+    // A new user_files entry will be created below, so now the physical file's
+    // ref_count may be incremented (dedup path).
+    if let Some(ref existing) = existing_physical {
+        if let Err(e) = FileRepository::update_ref_count(state.db.pool(), existing.id, 1).await {
+            let _ = UserRepository::release_storage(state.db.pool(), auth_user.user_id, data.len() as i64).await;
+            return Err(e);
+        }
+    }
+
+    // Create a user_files entry so this user has their own reference to the file.
+    // Check for soft-deleted row with the same key first — restore it instead of inserting.
+    let user_file_res = async {
+        if let Some(deleted_uf) = UserFileRepository::find_deleted_by_user_file_and_name(
+            state.db.pool(),
+            auth_user.user_id,
+            file.id,
+            &original_name,
+        ).await? {
+            // Restore the soft-deleted entry. If no bucket was specified, keep the
+            // row's previous bucket rather than clearing it to NULL.
+            let restored_bucket = bucket_name.clone().or(deleted_uf.bucket_name.clone());
+            UserFileRepository::restore(state.db.pool(), deleted_uf.id).await?;
+            // Update bucket/folder if they changed
+            if deleted_uf.bucket_name != restored_bucket || deleted_uf.folder_id != resolved_folder_id {
+                UserFileRepository::update_bucket_and_folder(
+                    state.db.pool(),
+                    deleted_uf.id,
+                    restored_bucket,
+                    resolved_folder_id,
+                ).await?;
+            }
+            // Refresh the MIME type if the client sent a more specific one.
+            if let Some(ref mime) = mime_type {
+                if deleted_uf.mime_type.as_deref() != Some(mime.as_str()) {
+                    UserFileRepository::update_mime_type(state.db.pool(), deleted_uf.id, mime).await?;
+                }
+            }
+            // Re-fetch to get updated data
+            UserFileRepository::find_by_id(state.db.pool(), deleted_uf.id)
+                .await?
+                .ok_or_else(|| AppError::Internal("user_file not found after restore".to_string()))
+        } else {
+            // New row. Record the effective bucket (explicit or defaulted) so the
+            // file is correctly attributed for access checks and bucket limits.
+            let mut user_file_record =
+                UserFileRecord::new(auth_user.user_id, file.id, original_name, mime_type.clone(), Some(backend_name));
+            user_file_record.folder_id = resolved_folder_id;
+            UserFileRepository::create(state.db.pool(), user_file_record).await
+        }
+    }.await;
+
+    let user_file = match user_file_res {
+        Ok(uf) => uf,
+        Err(e) => {
+            let _ = UserRepository::release_storage(state.db.pool(), auth_user.user_id, data.len() as i64).await;
+            if let Some(ref existing) = existing_physical {
+                let _ = FileRepository::update_ref_count(state.db.pool(), existing.id, -1).await;
+            }
+            // Best-effort cleanup if we created a brand new physical file in this request
+            if existing_physical.is_none() {
+                let storage_key = format!("{}/{}/{}", &hash[..2], &hash[2..4], &hash);
+                let _ = backend.delete(&storage_key).await;
+                // Try to remove storage objects for this file
+                let sos = StorageObjectRepository::find_by_file_id(state.db.pool(), file.id).await.ok();
+                if let Some(sos) = sos {
+                    for so in sos {
+                        let _ = StorageObjectRepository::delete(state.db.pool(), so.id).await;
+                    }
+                }
+                let _ = FileRepository::delete(state.db.pool(), file.id).await;
+            }
+            return Err(e);
+        }
+    };
+
+    if let Err(e) = charge_bot_upload(&state, &auth_user, data.len() as i64).await {
+        let _ = UserRepository::release_storage(state.db.pool(), auth_user.user_id, data.len() as i64).await;
+        if let Some(ref existing) = existing_physical {
+            let _ = FileRepository::update_ref_count(state.db.pool(), existing.id, -1).await;
+        } else {
+            let storage_key = format!("{}/{}/{}", &hash[..2], &hash[2..4], &hash);
+            let _ = backend.delete(&storage_key).await;
+            let sos = StorageObjectRepository::find_by_file_id(state.db.pool(), file.id).await.ok();
+            if let Some(sos) = sos {
+                for so in sos {
+                    let _ = StorageObjectRepository::delete(state.db.pool(), so.id).await;
+                }
+            }
+            let _ = FileRepository::delete(state.db.pool(), file.id).await;
+        }
+        let _ = UserFileRepository::delete(state.db.pool(), user_file.id).await;
+        return Err(e);
+    }
 
     Ok(Json(UploadResponse {
         file: file_dto_from_user_file(&user_file, &file),
@@ -1869,7 +1914,11 @@ pub async fn restore_trash_file(
     let file = FileRepository::find_by_id(state.db.pool(), user_file.file_id)
         .await?
         .ok_or_else(|| AppError::Internal("physical file not found after restore".into()))?;
-    let _ = UserRepository::charge_storage(state.db.pool(), auth_user.user_id, file.size).await;
+    if !UserRepository::charge_storage(state.db.pool(), auth_user.user_id, file.size).await? {
+        // Restore failed due to quota - revert the file back to trash state
+        UserFileRepository::delete(state.db.pool(), user_file.id).await?;
+        return Err(AppError::BadRequest("storage quota exceeded".into()));
+    }
 
     Ok(Json(MessageResponse {
         message: format!("file '{}' restored", user_file.original_name),
@@ -1953,7 +2002,19 @@ pub async fn restore_trash_folder(
     .unwrap_or(0);
 
     if total_size > 0 {
-        let _ = UserRepository::charge_storage(state.db.pool(), auth_user.user_id, total_size).await;
+        if !UserRepository::charge_storage(state.db.pool(), auth_user.user_id, total_size).await? {
+            // Revert restoration on quota failure - move back to trash
+            let _ = sqlx::query("UPDATE user_files SET deleted_at = NOW() WHERE user_id = $1 AND deleted_at IS NULL AND folder_id IN (WITH RECURSIVE tree(id) AS (SELECT id FROM user_folders WHERE id = $2 UNION ALL SELECT uf2.id FROM user_folders uf2 INNER JOIN tree t ON uf2.parent_id = t.id) SELECT id FROM tree)")
+                .bind(auth_user.user_id.to_string())
+                .bind(folder.id.to_string())
+                .execute(state.db.pool())
+                .await;
+            let _ = sqlx::query("UPDATE user_folders SET deleted_at = NOW() WHERE id IN (WITH RECURSIVE tree(id) AS (SELECT id FROM user_folders WHERE id = $1 UNION ALL SELECT uf2.id FROM user_folders uf2 INNER JOIN tree t ON uf2.parent_id = t.id) SELECT id FROM tree)")
+                .bind(folder.id.to_string())
+                .execute(state.db.pool())
+                .await;
+            return Err(AppError::BadRequest("storage quota exceeded".into()));
+        }
     }
 
     Ok(Json(MessageResponse {

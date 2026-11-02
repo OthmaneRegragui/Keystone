@@ -240,7 +240,7 @@ docker exec keystone-postgres psql -U keystone -d keystone -c "SELECT version();
                             <li><code>SERVER_PORT</code> (default 3000), <code>APP_ENV</code>, <code>SERVER_HOST</code></li>
                             <li><code>POSTGRES_*</code> — bare-metal DB URL is derived from them; compose wires the server to the <code>postgres</code> container automatically (override with <code>DATABASE_URL</code>/<code>KEYSTONE__DATABASE__URL</code>)</li>
                             <li><code>JWT_SECRET</code>, <code>JWT_EXPIRY_MINUTES</code>, <code>REFRESH_EXPIRY_DAYS</code></li>
-                            <li><code>ENCRYPTION_TOKEN</code> — must be stable across restarts; rotating it invalidates encrypted values</li>
+                            <li><code>ENCRYPTION_TOKEN</code> — encrypts FTP passwords and the captcha secret key at rest; must be stable across restarts, rotating it invalidates previously-encrypted values</li>
                             <li><code>STORAGE_LOCAL_PATHS</code> (comma-separated; first is default), <code>STORAGE_MAX_UPLOAD_SIZE_MB</code></li>
                             <li><code>DATA_HOST_PATH</code> — where storage lives <em>on the host</em>: empty = <code>storagedata</code> volume, <code>./data</code> = a folder in this project, or any absolute host path (see Storage Layout above)</li>
                             <li><code>WORKER_*_INTERVAL_SECS</code> — GC, integrity verification, stats cadence</li>

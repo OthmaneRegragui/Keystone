@@ -326,8 +326,8 @@ impl Settings {
             },
             "rate_limit": {
                 "enabled": true,
-                "requests_per_second": 50,
-                "burst_size": 100,
+                "requests_per_second": 10,
+                "burst_size": 20,
                 "trust_proxy_headers": false,
             },
             "cors": {

@@ -123,6 +123,10 @@ async fn main() {
     let session_service =
         SessionService::new(db.pool().clone(), refresh_expiry_days.saturating_mul(24 * 60));
 
+    // Key for decrypting FTP passwords and captcha secrets at rest (derived
+    // once from the deployment token and reused for backend init + AppState).
+    let secrets = keystone::utils::secrets::Secrets::from_token(&settings.security.encryption_token);
+
     let mut storage = StorageRegistry::new();
 
     // No buckets are ever auto-seeded — not even on a fresh install. The
@@ -151,7 +155,7 @@ async fn main() {
                     .and_then(|p| p.connection_id.as_ref())
                     .and_then(|id| connections.get(id));
                 let backend =
-                    keystone::storage::build_backend(b, owning, connection).unwrap_or_else(|e| {
+                    keystone::storage::build_backend(b, owning, connection, &secrets).unwrap_or_else(|e| {
                         panic!(
                             "failed to init storage for bucket '{}' at '{}': {e}",
                             b.name, b.path
@@ -177,9 +181,17 @@ async fn main() {
         jwt_service,
         storage: RwLock::new(storage),
         session_service,
-        captcha_service: keystone::utils::auth::captcha::CaptchaService::new(&settings.captcha),
+        captcha_service: keystone::utils::auth::captcha::CaptchaService::new(
+            &settings.captcha,
+            &settings.security.encryption_token,
+        ),
+        secrets,
         config: settings.clone(),
     });
+    // Access points configured before the secrets module existed read the
+    // global instance; installing it here makes legacy readers consistent too.
+    keystone::utils::secrets::Secrets::from_token(&settings.security.encryption_token)
+        .install_global();
 
     // axum's default body limit (2 MiB) would otherwise reject multipart
     // uploads larger than that before the handler's own per-field cap applies.
@@ -387,7 +399,7 @@ async fn ui_handler(
                 "/trash" => HtmlResponse(versioned(TRASH_HTML)).into_response(),
                 "/shared" => HtmlResponse(versioned(SHARED_HTML)).into_response(),
                 "/account" => HtmlResponse(versioned(ACCOUNT_HTML)).into_response(),
-                "/admin" => HtmlResponse(versioned(ADMIN_HTML)).into_response(),
+                "/admin" => admin_page(headers, &state, ADMIN_HTML).await,
                 "/docs" => admin_page(headers, &state, DOCS_HTML).await,
                 "/orphans" => admin_page(headers, &state, ORPHANS_HTML).await,
                 "/bots" => HtmlResponse(versioned(BOTS_HTML)).into_response(),

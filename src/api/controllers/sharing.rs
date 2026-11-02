@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::api::extractors::{AuthUser, BotCapability};
 use crate::dto::*;
 use crate::error::{AppError, AppResult};
-use crate::db::repos::{ShareRepository, FolderRepository, UserFileRepository, FileRepository, GroupRepository, AdminSettingRepository, StorageObjectRepository};
+use crate::db::repos::{ShareRepository, FolderRepository, UserFileRepository, FileRepository, GroupRepository, AdminSettingRepository, StorageObjectRepository, UserRepository, BucketRepository};
 use crate::db::rows::share_row::CreateSharedItemData;
 use crate::models::share::SharedItemType;
 use crate::models::StorageObject;
@@ -18,6 +18,39 @@ use crate::AppState;
 /// Hard cap on recipients per share request. Without it, one request could
 /// trigger an unbounded number of email lookups and share inserts (minor DoS).
 const MAX_SHARE_RECIPIENTS: usize = 100;
+
+/// Enforce the item owner's current bucket download permission.
+///
+/// Sharing is the mechanism that grants access to users *outside* a bucket's
+/// groups, so the recipient's own ACL must not be consulted — but the owner
+/// (who is always the person that created the share, since share creation
+/// verifies ownership) must still hold `can_download` on the bucket. Revoking
+/// an owner's bucket access therefore invalidates all their existing shares
+/// without any cascade deletion. Admins/Service accounts bypass group checks
+/// everywhere else, so they pass here too. `bucket_name == None` means a
+/// legacy/private file with no bucket attribution and is always allowed.
+async fn require_owner_download(
+    state: &AppState,
+    owner_id: uuid::Uuid,
+    bucket_name: Option<&str>,
+    action: &str,
+) -> AppResult<()> {
+    let Some(bucket) = bucket_name else {
+        return Ok(());
+    };
+    let owner = UserRepository::find_by_id(state.db.pool(), owner_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("file owner not found".into()))?;
+    if owner.is_admin() || owner.is_service() {
+        return Ok(());
+    }
+    if !BucketRepository::user_can_download(state.db.pool(), &owner_id.to_string(), bucket).await? {
+        return Err(AppError::Forbidden(format!(
+            "shared content is no longer available: the owner lost permission to {action}"
+        )));
+    }
+    Ok(())
+}
 
 /// Share files or folders with other users by email.
 /// POST /api/share
@@ -70,15 +103,20 @@ pub async fn share_item(
     // Verify the item exists and belongs to the sharer
     match item_type {
         SharedItemType::File => {
-            let uf = UserFileRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, body.item_id).await?;
-            if uf.is_none() {
-                return Err(AppError::NotFound("file not found".into()));
+            let uf = UserFileRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, body.item_id).await?
+                .ok_or_else(|| AppError::NotFound("file not found".into()))?;
+            // Enforce bucket ACL - sharer must have download permission (admins bypass)
+            if !auth_user.is_admin() {
+                if let Some(ref bucket_name) = uf.bucket_name {
+                    require_owner_download(&state, auth_user.user_id, Some(bucket_name), "share files").await?;
+                }
             }
         }
         SharedItemType::Folder => {
-            let folder = FolderRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, body.item_id).await?;
-            if folder.is_none() {
-                return Err(AppError::NotFound("folder not found".into()));
+            let folder = FolderRepository::find_by_user_and_id(state.db.pool(), auth_user.user_id, body.item_id).await?
+                .ok_or_else(|| AppError::NotFound("folder not found".into()))?;
+            if !auth_user.is_admin() {
+                require_owner_download(&state, auth_user.user_id, Some(&folder.bucket_name), "share folders").await?;
             }
         }
     }
@@ -299,11 +337,13 @@ pub async fn download_shared_file(
     )
     .await?;
 
+    let user_file = UserFileRepository::find_by_id(state.db.pool(), user_file_id).await?
+        .ok_or_else(|| AppError::NotFound("file not found".into()))?;
+
     if !is_shared {
         // The file is not directly shared — fall back to checking whether any
         // ancestor folder of this file is shared with the recipient.
-        let user_file = UserFileRepository::find_by_id(state.db.pool(), user_file_id).await?;
-        let via_folder = match user_file.as_ref().and_then(|uf| uf.folder_id) {
+        let via_folder = match user_file.folder_id {
             Some(folder_id) => is_shared_or_ancestor_shared(
                 state.db.pool(),
                 auth_user.user_id,
@@ -317,9 +357,16 @@ pub async fn download_shared_file(
         }
     }
 
-    // Look up the file
-    let user_file = UserFileRepository::find_by_id(state.db.pool(), user_file_id).await?
-        .ok_or_else(|| AppError::NotFound("file not found".into()))?;
+    // The share is only as strong as the sharer's current access: if the
+    // owner's bucket download permission has been revoked, existing shares
+    // stop working (no cascade deletes needed).
+    require_owner_download(
+        &state,
+        user_file.user_id,
+        user_file.bucket_name.as_deref(),
+        "download shared files",
+    )
+    .await?;
 
     let file = FileRepository::find_by_id(state.db.pool(), user_file.file_id).await?
         .ok_or_else(|| AppError::Internal("physical file not found".into()))?;
@@ -386,7 +433,7 @@ pub async fn shared_folder_contents(
     auth_user.require_scope("files:read")?;
 
     // Verify the folder exists
-    FolderRepository::find_by_id(state.db.pool(), folder_id).await?
+    let folder = FolderRepository::find_by_id(state.db.pool(), folder_id).await?
         .ok_or_else(|| AppError::NotFound("folder not found".into()))?;
 
     // Verify the folder is shared with the user (directly or via ancestor)
@@ -399,6 +446,15 @@ pub async fn shared_folder_contents(
     if !is_shared {
         return Err(AppError::NotFound("folder not found or not shared with you".into()));
     }
+
+    // The share is only as strong as the sharer's current bucket access.
+    require_owner_download(
+        &state,
+        folder.user_id,
+        Some(&folder.bucket_name),
+        "browse shared folders",
+    )
+    .await?;
 
     // Find the top-level shared ancestor to get the sharer's info
     let sharer_info = find_top_level_share_sharer(state.db.pool(), auth_user.user_id, folder_id).await?;

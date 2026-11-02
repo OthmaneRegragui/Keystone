@@ -375,15 +375,21 @@ pub async fn update_captcha_setting(
     if site_key.len() > MAX_CAPTCHA_KEY_LEN {
         return Err(AppError::BadRequest("site key is too long".into()));
     }
-    // `None` keeps the stored secret; `Some("")` clears it.
-    let secret_key = match body.secret_key.as_deref().map(str::trim) {
-        Some(secret) if secret.len() > MAX_CAPTCHA_KEY_LEN => {
-            return Err(AppError::BadRequest("secret key is too long".into()));
+    // `None` keeps the stored secret; `Some("")` clears it. A non-empty value
+    // is encrypted with the deployment's `ENCRYPTION_TOKEN` before it is
+    // stored, so the Turnstile secret is not readable from the database.
+    let secret_key: Option<String> = match body.secret_key.as_deref().map(str::trim) {
+        None => None,
+        Some("") => Some(String::new()),
+        Some(secret) => {
+            if secret.len() > MAX_CAPTCHA_KEY_LEN {
+                return Err(AppError::BadRequest("secret key is too long".into()));
+            }
+            Some(state.secrets.encrypt(secret)?)
         }
-        other => other,
     };
 
-    AdminSettingRepository::set_captcha(state.db.pool(), body.enabled, site_key, secret_key).await?;
+    AdminSettingRepository::set_captcha(state.db.pool(), body.enabled, site_key, secret_key.as_deref()).await?;
 
     // Enabling the captcha without a complete key pair would lock every user
     // out of login, so the server stays inactive and says so loudly rather than

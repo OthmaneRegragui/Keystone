@@ -61,7 +61,7 @@ async fn backend_for(
         Some(id) => ConnectionRepository::find_by_id(state.db.pool(), id).await?,
         None => None,
     };
-    crate::storage::build_backend(bucket, owning, connection.as_ref()).map_err(|e| {
+    crate::storage::build_backend(bucket, owning, connection.as_ref(), &state.secrets).map_err(|e| {
         AppError::Internal(format!(
             "failed to build storage for bucket '{}': {e}",
             bucket.name

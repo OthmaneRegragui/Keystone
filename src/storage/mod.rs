@@ -38,12 +38,17 @@ pub fn build_backend(
     bucket: &Bucket,
     owning_path: Option<&StoragePath>,
     connection: Option<&Connection>,
+    secrets: &crate::utils::secrets::Secrets,
 ) -> AppResult<Arc<dyn StorageBackend>> {
     let local_root = std::path::PathBuf::from(&bucket.path);
 
     match (owning_path, connection) {
         (Some(sp), Some(conn)) if conn.is_ftp() => {
-            let mut config: ftp::FtpConfig = serde_json::from_str(&conn.config).map_err(|e| {
+            // The FTP password is encrypted at rest (see `utils::secrets`);
+            // decrypt it before the config is used. Legacy plaintext rows
+            // written by older builds pass through unchanged.
+            let stored = secrets.decrypt(&conn.config)?;
+            let mut config: ftp::FtpConfig = serde_json::from_str(&stored).map_err(|e| {
                 AppError::Validation(format!(
                     "connection '{}' has invalid FTP settings: {e}",
                     conn.name

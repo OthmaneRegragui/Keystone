@@ -225,12 +225,17 @@ impl BucketRepository {
     }
 
     /// Check if a user can download from a specific bucket.
+    ///
+    /// Joins `buckets` on id so the caller can pass the *name*: comparing the
+    /// name directly to `group_buckets.bucket_id` (a UUID) silently denied
+    /// everyone — the method previously existed but was never exercised.
     pub async fn user_can_download(pool: &PgPool, user_id: &str, bucket_name: &str) -> AppResult<bool> {
         let (allowed,): (bool,) = sqlx::query_as(
             "SELECT COALESCE(BOOL_OR(gb.can_download), false)
              FROM group_buckets gb
              INNER JOIN group_members gm ON gb.group_id = gm.group_id AND gm.user_id = $1
-             WHERE gb.bucket_id = $2",
+             INNER JOIN buckets b ON b.id = gb.bucket_id
+             WHERE b.name = $2",
         )
         .bind(user_id)
         .bind(bucket_name)

@@ -62,10 +62,12 @@ struct VerifyResponse {
 pub struct CaptchaService {
     client: reqwest::Client,
     verify_url: String,
+    /// Key for decrypting the stored Turnstile secret (encrypted at rest).
+    secrets: crate::utils::secrets::Secrets,
 }
 
 impl CaptchaService {
-    pub fn new(config: &CaptchaConfig) -> Self {
+    pub fn new(config: &CaptchaConfig, encryption_token: &str) -> Self {
         let verify_url = match config.turnstile_verify_url.trim() {
             "" => DEFAULT_VERIFY_URL.to_string(),
             url => url.to_string(),
@@ -81,6 +83,7 @@ impl CaptchaService {
                 .build()
                 .unwrap_or_default(),
             verify_url,
+            secrets: crate::utils::secrets::Secrets::from_token(encryption_token),
         }
     }
 
@@ -100,7 +103,10 @@ impl CaptchaService {
         // not pay for (or depend on) the settings row.
         let keys = if enabled {
             let keys = AdminSettingRepository::get_captcha_keys(pool).await?;
-            AdminCaptchaKeys::new(keys.site_key, keys.secret_key)
+            // The Secret key is encrypted at rest; legacy plaintext rows
+            // written before encryption pass through unchanged.
+            let secret = self.secrets.decrypt(&keys.secret_key)?;
+            AdminCaptchaKeys::new(keys.site_key, secret)
         } else {
             AdminCaptchaKeys::default()
         };
@@ -294,7 +300,7 @@ mod tests {
     use reqwest::StatusCode;
 
     fn service() -> CaptchaService {
-        CaptchaService::new(&CaptchaConfig::default())
+        CaptchaService::new(&CaptchaConfig::default(), "test-token-0123456789")
     }
 
     fn keys(site: &str, secret: &str) -> AdminCaptchaKeys {
@@ -310,7 +316,7 @@ mod tests {
     fn explicit_verify_url_is_used() {
         let service = CaptchaService::new(&CaptchaConfig {
             turnstile_verify_url: "http://127.0.0.1:9/siteverify".to_string(),
-        });
+        }, "test-token-0123456789");
         assert_eq!(service.verify_url(), "http://127.0.0.1:9/siteverify");
     }
 
@@ -363,7 +369,7 @@ mod tests {
         // instead of the missing-challenge 422 asserted below.
         let service = CaptchaService::new(&CaptchaConfig {
             turnstile_verify_url: "http://127.0.0.1:9/siteverify".to_string(),
-        });
+        }, "test-token-0123456789");
 
         for token in [None, Some(""), Some("   ")] {
             let err = service
@@ -389,7 +395,7 @@ mod tests {
     async fn verification_fails_closed_when_the_verifier_is_unreachable() {
         let service = CaptchaService::new(&CaptchaConfig {
             turnstile_verify_url: "http://127.0.0.1:9/siteverify".to_string(),
-        });
+        }, "test-token-0123456789");
         let err = service
             .enforce_with(&keys("site", "secret"), Some("token"), None)
             .await

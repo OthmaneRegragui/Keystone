@@ -16,6 +16,9 @@ pub struct AppState {
     /// Cloudflare Turnstile verification for unauthenticated endpoints. A
     /// no-op when no captcha keys are configured.
     pub captcha_service: crate::utils::auth::captcha::CaptchaService,
+    /// Key for encrypting stored secrets (FTP passwords) at rest, derived from
+    /// the deployment's `ENCRYPTION_TOKEN`.
+    pub secrets: crate::utils::secrets::Secrets,
     pub config: crate::config::Settings,
 }
 
@@ -41,7 +44,7 @@ impl AppState {
             let connection = owning
                 .and_then(|p| p.connection_id.as_ref())
                 .and_then(|id| connections.get(id));
-            let backend = crate::storage::build_backend(bucket, owning, connection).map_err(|e| {
+            let backend = crate::storage::build_backend(bucket, owning, connection, &self.secrets).map_err(|e| {
                 crate::error::AppError::Internal(format!(
                     "failed to build storage for bucket '{}': {e}",
                     bucket.name
