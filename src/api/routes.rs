@@ -156,7 +156,10 @@ pub fn api_routes() -> Router<Arc<AppState>> {
                     .route("/api-keys/revoke", axum::routing::delete(crate::api::controllers::admin::revoke_api_key))
                     .route("/bots", axum::routing::get(crate::api::controllers::admin::bots::list_bots))
                     .route("/bots", axum::routing::post(crate::api::controllers::admin::bots::create_bot))
-                    .route("/bots/:id", axum::routing::put(crate::api::controllers::admin::bots::update_bot).delete(crate::api::controllers::admin::bots::delete_bot)),
+                    .route("/bots/:id", axum::routing::put(crate::api::controllers::admin::bots::update_bot).delete(crate::api::controllers::admin::bots::delete_bot))
+                    .route("/mirror-jobs", axum::routing::get(crate::api::controllers::admin::list_mirror_jobs).post(crate::api::controllers::admin::create_mirror_job))
+                    .route("/mirror-jobs/:id", axum::routing::put(crate::api::controllers::admin::update_mirror_job).delete(crate::api::controllers::admin::delete_mirror_job))
+                    .route("/mirror-jobs/:id/run", axum::routing::post(crate::api::controllers::admin::run_mirror_job_now)),
                 )
                 .layer(from_fn(reject_bots)),
         )

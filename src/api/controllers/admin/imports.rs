@@ -782,7 +782,7 @@ fn raw_blob_key(path: &str) -> Option<String> {
 /// Within a single bucket, content is deduplicated by hash. Returns the file
 /// record and whether its `files` row was created here (a brand-new blob
 /// already starts with ref_count = 1 for the link that follows).
-async fn ensure_blob_in_backend(
+pub(crate) async fn ensure_blob_in_backend(
     state: &AppState,
     backend_name: &str,
     hash: &str,

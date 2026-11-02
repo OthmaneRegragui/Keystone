@@ -2,8 +2,12 @@ mod helpers;
 
 use keystone::db::repos::api_keys::ApiKeyRepository;
 use keystone::db::repos::audit::AuditLogRepository;
+use keystone::db::repos::buckets::BucketRepository;
 use keystone::db::repos::files::FileRepository;
 use keystone::db::repos::folders::FolderRepository;
+use keystone::db::repos::mirror_jobs::{
+    MirrorJobChanges, MirrorJobRepository, NewMirrorJob, NewTargetUserFile,
+};
 use keystone::db::repos::storage::StorageObjectRepository;
 use keystone::db::repos::user_files::UserFileRepository;
 use keystone::db::repos::users::UserRepository;
@@ -16,6 +20,7 @@ use keystone::db::rows::user_row::CreateUserData;
 use keystone::db::rows::CreateAuditLogData;
 use keystone::error::AppError;
 use keystone::models::UserRole;
+use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -1223,4 +1228,249 @@ async fn test_audit_log_list() {
         .await
         .unwrap();
     assert_eq!(by_upload.len(), 2);
+}
+
+// ==================== MirrorJobRepository Tests ====================
+
+#[tokio::test]
+async fn test_mirror_job_round_trip_and_prune() {
+    let db = helpers::setup_test_db().await;
+    let pool = db.pool();
+    let user_id = create_test_user(pool).await;
+
+    let suffix = &Uuid::new_v4().to_string()[..8];
+    let source_bucket = format!("src_{suffix}");
+    let target_bucket = format!("dst_{suffix}");
+    BucketRepository::create(pool, &source_bucket, "/tmp/src")
+        .await
+        .unwrap();
+    BucketRepository::create(pool, &target_bucket, "/tmp/dst")
+        .await
+        .unwrap();
+
+    // Source folder tree: Docs / Work
+    let source_root = FolderRepository::create(
+        pool,
+        FolderRecord::new(user_id, source_bucket.clone(), "Docs".into(), None),
+    )
+    .await
+    .unwrap();
+    let source_child = FolderRepository::create(
+        pool,
+        FolderRecord::new(
+            user_id,
+            source_bucket.clone(),
+            "Work".into(),
+            Some(source_root.id),
+        ),
+    )
+    .await
+    .unwrap();
+
+    // Physical file plus a source link inside Work.
+    let hash = format!("{:064x}", Uuid::new_v4().as_u128());
+    let file_id = create_test_file(pool, &hash).await;
+    let mut source_link = UserFileRecord::new(
+        user_id,
+        file_id,
+        "report.txt".into(),
+        Some("text/plain".into()),
+        Some(source_bucket.clone()),
+    );
+    source_link.folder_id = Some(source_child.id);
+    let source_link = UserFileRepository::create(pool, source_link).await.unwrap();
+
+    let job = MirrorJobRepository::create(
+        pool,
+        NewMirrorJob {
+            id: Uuid::new_v4(),
+            name: format!("mirror_{suffix}"),
+            job_type: "mirror_bucket".into(),
+            source_bucket: source_bucket.clone(),
+            target_bucket: target_bucket.clone(),
+            schedule_time: "00:00".into(),
+            enabled: true,
+            prune: true,
+            next_run_at: Some(Utc::now().to_rfc3339()),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Source listing includes the folder tree and the link.
+    let source_folders = MirrorJobRepository::list_source_folders(pool, &source_bucket)
+        .await
+        .unwrap();
+    assert_eq!(source_folders.len(), 2);
+    let source_files = MirrorJobRepository::list_source_files(pool, &source_bucket)
+        .await
+        .unwrap();
+    assert_eq!(source_files.len(), 1);
+    assert_eq!(source_files[0].blake3_hash, hash);
+    assert_eq!(
+        source_files[0].folder_id.as_deref(),
+        Some(source_child.id.to_string().as_str())
+    );
+
+    // Recreate the tree in the target bucket.
+    let target_root = Uuid::new_v4();
+    MirrorJobRepository::create_target_folder(
+        pool,
+        target_root,
+        &user_id.to_string(),
+        &target_bucket,
+        None,
+        "Docs",
+        job.id,
+    )
+    .await
+    .unwrap();
+    let found_root = MirrorJobRepository::find_target_folder(
+        pool,
+        &user_id.to_string(),
+        &target_bucket,
+        None,
+        "Docs",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(found_root.id, target_root.to_string());
+    assert_eq!(
+        found_root.mirror_job_id.as_deref(),
+        Some(job.id.to_string().as_str())
+    );
+
+    let target_child = Uuid::new_v4();
+    MirrorJobRepository::create_target_folder(
+        pool,
+        target_child,
+        &user_id.to_string(),
+        &target_bucket,
+        Some(&target_root.to_string()),
+        "Work",
+        job.id,
+    )
+    .await
+    .unwrap();
+
+    MirrorJobRepository::insert_target_user_file(
+        pool,
+        NewTargetUserFile {
+            id: Uuid::new_v4(),
+            user_id: &user_id.to_string(),
+            file_id: &file_id.to_string(),
+            original_name: "report.txt",
+            mime_type: Some("text/plain"),
+            bucket_name: &target_bucket,
+            folder_id: Some(&target_child.to_string()),
+            job_id: job.id,
+        },
+    )
+    .await
+    .unwrap();
+
+    let target_link = MirrorJobRepository::find_target_user_file(
+        pool,
+        &user_id.to_string(),
+        &file_id.to_string(),
+        "report.txt",
+        &target_bucket,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        target_link.folder_id.as_deref(),
+        Some(target_child.to_string().as_str())
+    );
+    assert_eq!(
+        target_link.mirror_job_id.as_deref(),
+        Some(job.id.to_string().as_str())
+    );
+
+    // A still-present source link means nothing is pruned.
+    assert!(MirrorJobRepository::prune_target_user_files(
+        pool,
+        job.id,
+        &target_bucket,
+        &source_bucket
+    )
+    .await
+    .unwrap()
+    .is_empty());
+
+    // Soft-delete the source link; the next prune removes the target link.
+    UserFileRepository::delete(pool, source_link.id).await.unwrap();
+    let pruned = MirrorJobRepository::prune_target_user_files(
+        pool,
+        job.id,
+        &target_bucket,
+        &source_bucket,
+    )
+    .await
+    .unwrap();
+    assert_eq!(pruned.len(), 1);
+    assert_eq!(pruned[0].file_id, file_id.to_string());
+    assert!(pruned[0].purged_at.is_none());
+
+    // Both mirrored folders are empty now, so the whole tree is removed.
+    let deleted_folders =
+        MirrorJobRepository::prune_empty_mirrored_folders(pool, job.id, &[])
+            .await
+            .unwrap();
+    assert_eq!(deleted_folders, 2);
+
+    // Scheduling lifecycle.
+    let due = MirrorJobRepository::list_due(pool, &Utc::now().to_rfc3339())
+        .await
+        .unwrap();
+    assert!(due.iter().any(|j| j.id == job.id));
+    let claimed = MirrorJobRepository::claim(pool, job.id, &Utc::now().to_rfc3339())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(claimed.running);
+    assert!(MirrorJobRepository::claim(pool, job.id, &Utc::now().to_rfc3339())
+        .await
+        .unwrap()
+        .is_none());
+    MirrorJobRepository::finish(pool, job.id, "success", None, 1, 1, None)
+        .await
+        .unwrap();
+    let finished = MirrorJobRepository::find_by_id(pool, job.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!finished.running);
+    assert_eq!(finished.last_status.as_deref(), Some("success"));
+    assert_eq!(finished.last_files_copied, 1);
+    assert_eq!(finished.last_files_pruned, 1);
+
+    // Updating re-arms the schedule and updates editable fields.
+    let updated = MirrorJobRepository::update(
+        pool,
+        job.id,
+        MirrorJobChanges {
+            name: format!("renamed_{suffix}"),
+            source_bucket: source_bucket.clone(),
+            target_bucket: target_bucket.clone(),
+            schedule_time: "12:30".into(),
+            enabled: true,
+            prune: false,
+            next_run_at: Some(Utc::now().to_rfc3339()),
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(updated.name, format!("renamed_{suffix}"));
+    assert_eq!(updated.schedule_time, "12:30");
+    assert!(!updated.prune);
+
+    assert!(MirrorJobRepository::delete(pool, job.id).await.unwrap());
+    assert!(MirrorJobRepository::find_by_id(pool, job.id)
+        .await
+        .unwrap()
+        .is_none());
 }

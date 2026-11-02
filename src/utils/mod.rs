@@ -2,6 +2,7 @@ pub mod auth;
 pub mod format;
 pub mod hashing;
 pub mod names;
+pub mod schedule;
 pub mod secrets;
 pub mod traits;
 pub mod workers;

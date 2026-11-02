@@ -78,7 +78,7 @@
         }
         function adminPanel() {
             var params = new URLSearchParams(window.location.search);
-            var validTabs = ['overview','paths','connections','buckets','groups','users','settings','updates'];
+            var validTabs = ['overview','paths','connections','buckets','groups','users','settings','updates','mirrors'];
             var initialTab = validTabs.indexOf(params.get('page')) >= 0 ? params.get('page') : 'overview';
 
             function authHeaders() {
@@ -206,6 +206,11 @@
                 showImportModal: false,
                 importBucketName: '',
                 importCombinedStatus: '',
+                mirrorJobs: [],
+                mirrorJobsLoading: false,
+                showMirrorModal: false,
+                editingMirror: null,
+                mirrorForm: { name: '', source_bucket: '', target_bucket: '', schedule_time: '00:00', enabled: true, prune: false },
                 setTab: function(t) {
                     this.tab = t;
                     var url = new URL(window.location);
@@ -230,6 +235,7 @@
                     self.loadStoragePaths();
                     self.loadConnections();
                     self.loadStorageBase();
+                    self.loadMirrorJobs();
                 },
                 loadStats: function() {
                     var self = this;
@@ -311,6 +317,117 @@
                             self.botsLoading = false;
                         })
                         .catch(function() { self.botsLoading = false; });
+                },
+                loadMirrorJobs: function() {
+                    var self = this;
+                    self.mirrorJobsLoading = true;
+                    authFetch('/api/admin/mirror-jobs')
+                        .then(function(r) { return r.ok ? r.json() : []; })
+                        .then(function(d) {
+                            self.mirrorJobs = d || [];
+                            self.mirrorJobsLoading = false;
+                            // Keep the table live while a job is running or
+                            // queued for an immediate run.
+                            var now = Date.now();
+                            var pending = self.mirrorJobs.some(function(j) {
+                                if (j.running) return true;
+                                if (!j.next_run_at) return false;
+                                var at = new Date(j.next_run_at).getTime();
+                                return !isNaN(at) && at <= now + 1000;
+                            });
+                            if (pending) {
+                                setTimeout(function() { self.loadMirrorJobs(); }, 3000);
+                            }
+                        })
+                        .catch(function() { self.mirrorJobsLoading = false; });
+                },
+                blankMirror: function() {
+                    return { name: '', source_bucket: '', target_bucket: '', schedule_time: '00:00', enabled: true, prune: false };
+                },
+                openAddMirror: function() {
+                    this.editingMirror = null;
+                    this.mirrorForm = this.blankMirror();
+                    this.showMirrorModal = true;
+                },
+                openEditMirror: function(job) {
+                    this.editingMirror = job;
+                    this.mirrorForm = {
+                        name: job.name,
+                        source_bucket: job.source_bucket,
+                        target_bucket: job.target_bucket,
+                        schedule_time: job.schedule_time,
+                        enabled: job.enabled,
+                        prune: job.prune
+                    };
+                    this.showMirrorModal = true;
+                },
+                mirrorPayload: function() {
+                    var f = this.mirrorForm;
+                    return {
+                        name: f.name,
+                        source_bucket: f.source_bucket,
+                        target_bucket: f.target_bucket,
+                        schedule_time: f.schedule_time,
+                        enabled: !!f.enabled,
+                        prune: !!f.prune
+                    };
+                },
+                saveMirror: function() {
+                    var self = this;
+                    var editing = self.editingMirror;
+                    var url = editing ? '/api/admin/mirror-jobs/' + editing.id : '/api/admin/mirror-jobs';
+                    var method = editing ? 'PUT' : 'POST';
+                    authFetch(url, {
+                        method: method,
+                        body: JSON.stringify(self.mirrorPayload())
+                    }).then(function(r) {
+                        if (!r.ok) return r.json().then(function(e) { throw e; });
+                        return r.json();
+                    }).then(function() {
+                        self.showMirrorModal = false;
+                        self.editingMirror = null;
+                        self.loadMirrorJobs();
+                    }).catch(function(e) { alert(e.detail || e.error || 'Failed to save mirror job'); });
+                },
+                deleteMirror: function(job) {
+                    if (!confirm('Delete mirror job "' + job.name + '"?')) return;
+                    var self = this;
+                    authFetch('/api/admin/mirror-jobs/' + job.id, { method: 'DELETE' })
+                        .then(function(r) {
+                            if (!r.ok) return r.json().then(function(e) { throw e; });
+                            return r.json();
+                        })
+                        .then(function() { self.loadMirrorJobs(); })
+                        .catch(function(e) { alert(e.detail || e.error || 'Failed to delete mirror job'); });
+                },
+                runMirrorNow: function(job) {
+                    var self = this;
+                    authFetch('/api/admin/mirror-jobs/' + job.id + '/run', { method: 'POST' })
+                        .then(function(r) {
+                            if (!r.ok) return r.json().then(function(e) { throw e; });
+                            return r.json();
+                        })
+                        .then(function() { self.loadMirrorJobs(); })
+                        .catch(function(e) { alert(e.detail || e.error || 'Failed to queue mirror job'); });
+                },
+                toggleMirror: function(job) {
+                    var self = this;
+                    var payload = {
+                        name: job.name,
+                        source_bucket: job.source_bucket,
+                        target_bucket: job.target_bucket,
+                        schedule_time: job.schedule_time,
+                        enabled: !job.enabled,
+                        prune: job.prune
+                    };
+                    authFetch('/api/admin/mirror-jobs/' + job.id, {
+                        method: 'PUT',
+                        body: JSON.stringify(payload)
+                    }).then(function(r) {
+                        if (!r.ok) return r.json().then(function(e) { throw e; });
+                        return r.json();
+                    }).then(function() { self.loadMirrorJobs(); })
+                      .catch(function(e) { alert(e.detail || e.error || 'Failed to update mirror job'); });
                 },
                 checkUpdate: function() {
                     // Ask the server (admin endpoint) for the latest release so
@@ -1178,6 +1295,12 @@
                     if (isNaN(d.getTime())) return '-';
                     return d.toLocaleDateString();
                 },
+                fmtDateTime: function(s) {
+                    if (!s) return '-';
+                    var d = new Date(s);
+                    if (isNaN(d.getTime())) return '-';
+                    return d.toLocaleString();
+                },
                 fmtBytes: function(b) {
                     var n = Number(b);
                     if (!Number.isFinite(n) || n <= 0) return '0 B';
@@ -1219,6 +1342,7 @@
                     <button x-on:click="setTab('overview')" :class="tab==='overview' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Overview</button>
                     <button x-on:click="setTab('paths')" :class="tab==='paths' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Paths</button>
                     <button x-on:click="setTab('connections')" :class="tab==='connections' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Connections</button>
+                    <button x-on:click="setTab('mirrors')" :class="tab==='mirrors' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Mirrors</button>
                     <button x-on:click="setTab('buckets')" :class="tab==='buckets' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Buckets</button>
                     <button x-on:click="setTab('groups')" :class="tab==='groups' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Groups</button>
                     <button x-on:click="setTab('users')" :class="tab==='users' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Users</button>
@@ -1688,6 +1812,149 @@
                                 </template>
                                 <tr x-show="connections.length === 0">
                                     <td colspan="6" class="px-4 py-8 text-center text-gray-400">No connections configured</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Mirrors Tab -->
+                <div x-show="tab==='mirrors'" class="space-y-6">
+                    <div class="flex items-center justify-between gap-3">
+                        <div>
+                            <p class="text-sm text-gray-500">Scheduled robots that copy every user's files from a source bucket into a target bucket, preserving the folder layout.</p>
+                            <p class="text-xs text-gray-400 mt-1">Runs daily in UTC. Every target link keeps its own physical blob copy in the target bucket.</p>
+                        </div>
+                        <button x-on:click="openAddMirror()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition shrink-0">
+                            Add Mirror Job
+                        </button>
+                    </div>
+
+                    <!-- Add/Edit Mirror Modal -->
+                    <div x-show="showMirrorModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center" style="display:none;">
+                        <div class="fixed inset-0 bg-black/40" x-on:click="showMirrorModal = false"></div>
+                        <div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[90vh] flex flex-col">
+                            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                                <h3 class="text-lg font-semibold text-gray-900" x-text="editingMirror ? 'Edit Mirror Job' : 'New Mirror Job'"></h3>
+                                <button x-on:click="showMirrorModal = false" class="text-gray-400 hover:text-gray-600">
+                                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                                </button>
+                            </div>
+                            <div class="px-6 py-4 space-y-4 overflow-y-auto flex-1">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                                    <input type="text" x-model="mirrorForm.name" placeholder="e.g. Nightly backup"
+                                        class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                                </div>
+                                <div class="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-700 mb-1">Source bucket</label>
+                                        <select x-model="mirrorForm.source_bucket"
+                                            class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                                            <option value="">Select...</option>
+                                            <template x-for="b in buckets" :key="b.id">
+                                                <option :value="b.name" x-text="b.name"></option>
+                                            </template>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-700 mb-1">Target bucket</label>
+                                        <select x-model="mirrorForm.target_bucket"
+                                            class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                                            <option value="">Select...</option>
+                                            <template x-for="b in buckets" :key="b.id">
+                                                <option :value="b.name" x-text="b.name"></option>
+                                            </template>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">Start time (UTC)</label>
+                                    <input type="time" x-model="mirrorForm.schedule_time"
+                                        class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                                    <p class="text-xs text-gray-400 mt-1">The job runs every day at this time.</p>
+                                </div>
+                                <label class="flex items-center gap-2 text-sm text-gray-700">
+                                    <input type="checkbox" x-model="mirrorForm.enabled" class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
+                                    Enabled
+                                </label>
+                                <label class="flex items-start gap-2 text-sm text-gray-700">
+                                    <input type="checkbox" x-model="mirrorForm.prune" class="mt-0.5 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
+                                    <span>Prune target files whose source no longer exists
+                                        <span class="block text-xs text-gray-400">Only removes links created by this job.</span>
+                                    </span>
+                                </label>
+                            </div>
+                            <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-2">
+                                <button x-on:click="showMirrorModal = false" class="px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition">Cancel</button>
+                                <button x-on:click="saveMirror()" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition"
+                                    x-text="editingMirror ? 'Save Changes' : 'Create Job'"></button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Mirror Jobs Table -->
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200">
+                        <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead>
+                                <tr class="text-left text-gray-500 border-b border-gray-100">
+                                    <th class="px-4 py-3 font-medium">Name</th>
+                                    <th class="px-4 py-3 font-medium">Source → Target</th>
+                                    <th class="px-4 py-3 font-medium">Schedule</th>
+                                    <th class="px-4 py-3 font-medium">Status</th>
+                                    <th class="px-4 py-3 font-medium">Last run</th>
+                                    <th class="px-4 py-3 font-medium text-right">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-100">
+                                <template x-for="job in mirrorJobs" :key="job.id">
+                                    <tr>
+                                        <td class="px-4 py-3">
+                                            <div class="font-medium text-gray-900" x-text="job.name"></div>
+                                            <span :class="job.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'"
+                                                class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium mt-1"
+                                                x-text="job.enabled ? 'Enabled' : 'Disabled'"></span>
+                                        </td>
+                                        <td class="px-4 py-3 text-gray-600">
+                                            <span class="font-mono text-xs" x-text="job.source_bucket"></span>
+                                            <span class="text-gray-400 mx-1">→</span>
+                                            <span class="font-mono text-xs" x-text="job.target_bucket"></span>
+                                        </td>
+                                        <td class="px-4 py-3 text-gray-600">
+                                            <div class="font-mono text-xs" x-text="job.schedule_time + ' UTC'"></div>
+                                            <div class="text-xs text-gray-400" x-text="job.enabled ? 'Next: ' + fmtDateTime(job.next_run_at) : 'Paused'"></div>
+                                        </td>
+                                        <td class="px-4 py-3">
+                                            <span x-show="job.running" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">Running</span>
+                                            <span x-show="!job.running && job.last_status === 'success'" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">Success</span>
+                                            <span x-show="!job.running && job.last_status === 'error'" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700">Error</span>
+                                            <span x-show="!job.running && !job.last_status" class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">Never run</span>
+                                            <div x-show="job.last_error" class="text-xs text-red-600 mt-1 break-words" x-text="job.last_error"></div>
+                                        </td>
+                                        <td class="px-4 py-3 text-gray-500">
+                                            <div class="text-xs" x-text="fmtDateTime(job.last_finished_at)"></div>
+                                            <div class="text-xs text-gray-400" x-text="job.last_status === 'success' ? (job.last_files_copied + ' copied' + (job.last_files_pruned ? ', ' + job.last_files_pruned + ' pruned' : '')) : ''"></div>
+                                        </td>
+                                        <td class="px-4 py-3 text-right whitespace-nowrap">
+                                            <button x-on:click="runMirrorNow(job)" :disabled="job.running"
+                                                class="text-xs font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50 mr-3">Run now</button>
+                                            <button x-on:click="toggleMirror(job)" :disabled="job.running"
+                                                class="text-xs font-medium text-gray-600 hover:text-gray-800 disabled:opacity-50 mr-3"
+                                                x-text="job.enabled ? 'Disable' : 'Enable'"></button>
+                                            <button x-on:click="openEditMirror(job)" :disabled="job.running"
+                                                class="text-xs font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50 mr-3">Edit</button>
+                                            <button x-on:click="deleteMirror(job)" :disabled="job.running"
+                                                class="text-xs font-medium text-red-600 hover:text-red-800 disabled:opacity-50">Delete</button>
+                                        </td>
+                                    </tr>
+                                </template>
+                                <tr x-show="mirrorJobs.length === 0">
+                                    <td colspan="6" class="px-4 py-8 text-center text-gray-400">
+                                        <span x-show="mirrorJobsLoading">Loading...</span>
+                                        <span x-show="!mirrorJobsLoading">No mirror jobs configured</span>
+                                    </td>
                                 </tr>
                             </tbody>
                         </table>

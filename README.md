@@ -19,6 +19,7 @@
 - **Sharing** — share files and folders with other users by email (recipients can view/download but not reshare; gated by a global toggle and a per-group flag)
 - **Trash** — soft-deleted files and folders with restore and permanent-delete (tree-aware)
 - **Admin panel** with user management, group permissions, bucket configuration, and platform settings
+- **Scheduled bucket mirroring** — admin-managed "robots" copy a source bucket into a target bucket daily (UTC), preserving each user's folder layout with independent physical copies (RAID-1 style), without charging user quotas
 - **Modern file explorer** with list/grid views, breadcrumbs, search, and shareable `?dir=` deep links
 - **Shared sidebar navigation** across all pages (Dashboard, Files, Shared, Trash, Account, Bots, Admin) with light/dark theme toggle
 - **Background workers** for garbage collection, integrity checks, reference counting, and stats
@@ -656,6 +657,19 @@ The source repo defaults to `OthmaneRegragui/Keystone` and can be overridden wit
 | PUT | `/api/admin/buckets/edit` | `{ "original_name", "name", "path", "visible_to_users", "is_active", "storage_limit" }` (name validated) |
 | POST | `/api/admin/buckets/change-path` | Move a bucket to a new on-disk location: `{ "bucket_name", "new_path" }` |
 | GET | `/api/admin/backends` | List storage backends registered for all buckets |
+
+#### Mirror Jobs
+Admin-managed scheduled "robots" that copy every active user link from `source_bucket` into `target_bucket`, preserving each user's folder hierarchy. Every mirrored link gets its own physical blob in the target bucket's backend, so the target is a true replica (RAID-1 style) rather than a logical alias. Mirrored links do **not** count against users' storage quota.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/admin/mirror-jobs` | List all jobs |
+| POST | `/api/admin/mirror-jobs` | Create: `{ "name", "source_bucket", "target_bucket", "schedule_time": "00:00", "enabled": true, "prune": false }` |
+| PUT | `/api/admin/mirror-jobs/:id` | Update a job (same body as create) |
+| DELETE | `/api/admin/mirror-jobs/:id` | Delete a job; already-mirrored files are left in place |
+| POST | `/api/admin/mirror-jobs/:id/run` | Queue the job for an immediate one-off run |
+
+`schedule_time` is a daily UTC `HH:MM` start time. `prune` (default `false`) removes only target links created by that job once their matching source link no longer exists. Jobs run sequentially in the background; the admin **Mirrors** tab shows live status, last-run counts, and errors.
 
 #### Storage Paths
 Storage paths group buckets onto on-disk directories. The current base (first `STORAGE_LOCAL_PATHS` entry) is reported by `storage-base`; new paths are created under it.

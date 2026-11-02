@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use crate::error::{AppError, AppResult};
-use crate::models::{BotPathRule, Bucket, Connection, PlatformSettings, StoragePath, UserGroup};
+use crate::models::{BotPathRule, Bucket, Connection, MirrorJob, PlatformSettings, StoragePath, UserGroup};
 use serde::{Deserialize, Serialize};
 
 fn default_true() -> bool { true }
@@ -163,6 +163,30 @@ pub struct ChangeBucketPathRequest {
     pub new_path: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CreateMirrorJobRequest {
+    pub name: String,
+    pub source_bucket: String,
+    pub target_bucket: String,
+    pub schedule_time: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub prune: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateMirrorJobRequest {
+    pub name: String,
+    pub source_bucket: String,
+    pub target_bucket: String,
+    pub schedule_time: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub prune: bool,
+}
+
 // ─── Response DTOs (output) ──────────────────────────────────
 // These are lean HTTP transfer objects derived from core models.
 
@@ -203,6 +227,53 @@ impl BucketDto {
             deleted_files_size,
             orphaned_files,
             orphaned_files_size,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct MirrorJobDto {
+    pub id: String,
+    pub name: String,
+    pub job_type: String,
+    pub source_bucket: String,
+    pub target_bucket: String,
+    pub schedule_time: String,
+    pub enabled: bool,
+    pub prune: bool,
+    pub running: bool,
+    pub last_run_at: Option<String>,
+    pub last_finished_at: Option<String>,
+    pub next_run_at: Option<String>,
+    pub last_status: Option<String>,
+    pub last_error: Option<String>,
+    pub last_files_copied: i32,
+    pub last_files_pruned: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<MirrorJob> for MirrorJobDto {
+    fn from(job: MirrorJob) -> Self {
+        Self {
+            id: job.id.to_string(),
+            name: job.name,
+            job_type: job.job_type,
+            source_bucket: job.source_bucket,
+            target_bucket: job.target_bucket,
+            schedule_time: job.schedule_time,
+            enabled: job.enabled,
+            prune: job.prune,
+            running: job.running,
+            last_run_at: job.last_run_at.map(|d| d.to_rfc3339()),
+            last_finished_at: job.last_finished_at.map(|d| d.to_rfc3339()),
+            next_run_at: job.next_run_at.map(|d| d.to_rfc3339()),
+            last_status: job.last_status,
+            last_error: job.last_error,
+            last_files_copied: job.last_files_copied,
+            last_files_pruned: job.last_files_pruned,
+            created_at: job.created_at.to_rfc3339(),
+            updated_at: job.updated_at.to_rfc3339(),
         }
     }
 }

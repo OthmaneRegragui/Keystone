@@ -193,6 +193,16 @@ async fn main() {
     keystone::utils::secrets::Secrets::from_token(&settings.security.encryption_token)
         .install_global();
 
+    // Scheduled bucket-mirroring jobs. The scheduler is independent of the
+    // dormant WorkerScheduler so existing background workers keep their
+    // current (disabled) behaviour.
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+    let mirror_shutdown = shutdown_tx.subscribe();
+    let mirror_state = state.clone();
+    tokio::spawn(async move {
+        keystone::utils::workers::mirror::run_mirror_scheduler(mirror_state, mirror_shutdown).await;
+    });
+
     // axum's default body limit (2 MiB) would otherwise reject multipart
     // uploads larger than that before the handler's own per-field cap applies.
     let upload_limit = settings
@@ -260,12 +270,12 @@ async fn main() {
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(shutdown_signal(shutdown_tx))
     .await
     .expect("server error");
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(shutdown_tx: tokio::sync::broadcast::Sender<()>) {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
@@ -289,6 +299,7 @@ async fn shutdown_signal() {
     }
 
     tracing::info!("Shutdown signal received, starting graceful shutdown");
+    let _ = shutdown_tx.send(());
 }
 
 async fn ui_handler(
