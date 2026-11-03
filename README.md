@@ -594,15 +594,15 @@ Requests and responses are identical to the corresponding `/api/*` endpoints abo
 | GET | `/api/admin/stats` | `{ total_users, total_files, total_buckets, total_groups, block_registrations, active_user_files, active_user_files_size, deleted_user_files, deleted_user_files_size, orphaned_physical_files, orphaned_physical_files_size }` |
 | GET | `/api/admin/settings` | `{ block_registrations, allow_user_api_keys, allow_user_bots, allow_user_password_change, allow_user_sharing }` |
 | PUT | `/api/admin/settings` | Update setting: `{ "key": "allow_user_api_keys", "value": "true" }` — keys: `block_registrations`, `allow_user_api_keys`, `allow_user_bots`, `allow_user_password_change`, `allow_user_sharing` (`"true"`/`"false"`) |
-| GET | `/api/admin/update-check` | Check for a newer release: `{ "current_version", "latest"?, "update_available", "can_apply", "error"? }` — queries the project's GitHub releases API server-side and reports whether a newer version exists. `can_apply` is `true` when a one-click update mechanism is configured on the server |
+| GET | `/api/admin/update-check` | Check for newer commits: `{ "current_version", "current_commit", "latest"?, "update_available", "can_apply", "error"? }` — compares the commit the running binary was built from with the tracked branch HEAD via GitHub's commits API. `can_apply` is `true` when a one-click update mechanism is configured on the server |
 | POST | `/api/admin/update-apply` | Request a one-click update/restart: `{ "started", "message" }`. Admin-only. Returns `400` when no update mechanism is configured. The server only writes a marker file (or execs a configured hook) — it never touches Docker itself |
 
-The admin panel has a dedicated **Updates** tab showing the running version and a **Check for Updates** button that calls this endpoint (server-side, so no CORS/rate-limit concerns for admins). The check falls back to version tags when the repo has no published releases, and fails soft: no releases/tags is reported as "no update available" rather than an error, and only an unreachable or rate-limited GitHub is surfaced as an `error` string.
+The admin panel has a dedicated **Updates** tab showing the running version/commit and a **Check for Updates** button that calls this endpoint (server-side, so no CORS/rate-limit concerns for admins). Updates are tracked by **git commit, not by published releases**: `docker-run.sh` exports `KEYSTONE_GIT_COMMIT` from the checked-out repo, and the check compares it with the HEAD of `UPDATE_BRANCH` (default `main`). A plain `git pull` followed by a rebuild is therefore detected as an update even when no release was cut. The check fails soft: an unreachable or rate-limited GitHub is surfaced as an `error` string rather than a 500.
 
-When a newer version exists you get one of two buttons:
+When the branch has newer commits you get one of two buttons:
 
 - **Update & Restart** (one-click) — shown only when a mechanism is configured. Confirms, asks the server to start the update, then shows "reload this page in about a minute".
-- **Update to vX.Y.Z** (manual) — shown when no mechanism is configured; just links to the release page.
+- **View commit <sha>** (manual) — shown when no mechanism is configured; links to the commit on GitHub.
 
 **Why the server can't do it alone:** Keystone runs unprivileged inside Docker and has no access to your host's `git` or the Docker daemon. Mounting the Docker socket into the container would hand the server root-equivalent control of your machine, so Keystone deliberately does not do that. Instead the server drops a marker file into a folder that *is* shared with the host, and a small host-side script does the privileged part.
 
@@ -645,7 +645,7 @@ sudo systemctl enable --now keystone-auto-update
 
 **Other installs (systemd, VM, direct binary):** set `UPDATE_APPLY_HOOK` to the absolute path of an executable that pulls and restarts the server. The admin button runs that hook directly instead of writing a marker file.
 
-The source repo defaults to `OthmaneRegragui/Keystone` and can be overridden with the `UPDATE_REPO` env var (`owner/repo`).
+The source repo defaults to `OthmaneRegragui/Keystone` and can be overridden with the `UPDATE_REPO` env var (`owner/repo`); the followed branch defaults to `main` and can be changed with `UPDATE_BRANCH`.
 
 #### Buckets
 | Method | Path | Purpose |

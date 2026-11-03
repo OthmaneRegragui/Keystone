@@ -105,6 +105,9 @@ impl Default for AuthConfig {
 pub struct UpdateConfig {
     /// GitHub owner/repo used by the update check.
     pub repo: String,
+    /// Branch the update check compares against (defaults to `main`). Updates
+    /// are tracked by commit, not by published releases.
+    pub branch: String,
     /// Absolute path to an executable that pulls the new code and rebuilds /
     /// restarts the container (e.g. a wrapper around `docker-run.sh`). When set
     /// and executable, the admin panel offers a button that runs it instead of
@@ -121,6 +124,7 @@ impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
             repo: "OthmaneRegragui/Keystone".to_string(),
+            branch: "main".to_string(),
             apply_hook: String::new(),
             apply_request_path: String::new(),
         }
@@ -316,6 +320,7 @@ impl Settings {
             },
             "update": {
                 "repo": "OthmaneRegragui/Keystone",
+                "branch": "main",
                 "apply_hook": "",
                 "apply_request_path": ""
             },
@@ -396,6 +401,15 @@ impl Settings {
             if let Ok(raw) = std::env::var("UPDATE_REPO") {
                 if !raw.trim().is_empty() {
                     settings.update.repo = raw.trim().to_string();
+                }
+            }
+        }
+        // UPDATE_BRANCH: branch tracked by the git-based update check. Blank
+        // values are ignored so `UPDATE_BRANCH=` cannot empty the branch name.
+        if std::env::var_os("KEYSTONE__UPDATE__BRANCH").is_none() {
+            if let Ok(raw) = std::env::var("UPDATE_BRANCH") {
+                if !raw.trim().is_empty() {
+                    settings.update.branch = raw.trim().to_string();
                 }
             }
         }

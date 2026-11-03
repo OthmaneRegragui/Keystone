@@ -882,7 +882,7 @@ fn test_admin_page_references_api() {
         "admin page should reference /api/admin"
     );
     assert!(
-        html.contains("No update available for now"),
+        html.contains("No new commits on the tracked branch"),
         "admin page should show a friendly no-update message"
     );
 }

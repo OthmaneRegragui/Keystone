@@ -56,6 +56,10 @@ services:
       # `git pull && ./docker-run.sh`. This is the Docker-safe path — the
       # server never touches the Docker daemon or the host repo itself.
       - UPDATE_APPLY_REQUEST_PATH=/mnt/keystone/update-requests
+      # Commit the running image was built from, exported by docker-run.sh.
+      # The admin update check compares it against the remote branch HEAD, so
+      # updates are tracked by git pull rather than by published releases.
+      - KEYSTONE_GIT_COMMIT=${KEYSTONE_GIT_COMMIT:-unknown}
     volumes:
       # Where files live OUTSIDE the container is set with DATA_HOST_PATH in .env
       # (only the mount source changes — the server always sees STORAGE_LOCAL_PATHS):

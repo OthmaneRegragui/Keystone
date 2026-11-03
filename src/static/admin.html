@@ -151,6 +151,7 @@
                 settings: { block_registrations: true, allow_user_api_keys: false, allow_user_bots: false, allow_user_password_change: false, allow_user_sharing: false, captcha_enabled: false, captcha_secret_configured: false, captcha_site_key: '', captcha_configured: false },
                 captcha: { siteKey: '', secretKey: '', saving: false, message: '', error: false },
                 currentVersion: '__KEYSTONE_VERSION__',
+                currentCommit: '',
                 update: { checking: false, checked: false, loaded: false, available: false, canApply: false, applying: false, applied: false, latest: null, error: '' },
                 users: [],
                 buckets: [],
@@ -461,6 +462,7 @@
                             self.update.available = !!data.update_available;
                             self.update.canApply = !!data.can_apply;
                             self.currentVersion = data.current_version || self.currentVersion;
+                            self.currentCommit = data.current_commit || '';
                             self.update.loaded = true;
                             self.update.checking = false;
                         })
@@ -480,7 +482,7 @@
                 applyUpdate: function() {
                     var self = this;
                     if (self.update.applying || self.update.applied) return;
-                    if (!confirm('Pull the new version and restart Keystone now? The server will be briefly unavailable.')) return;
+                    if (!confirm('Pull the latest commits and rebuild Keystone now? The server will be briefly unavailable.')) return;
                     self.update.applying = true;
                     self.update.error = '';
                     authFetch('/api/admin/update-apply', { method: 'POST' })
@@ -2917,7 +2919,7 @@
                     <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                         <div class="px-6 py-4 border-b border-gray-200">
                             <h3 class="text-lg font-semibold text-gray-900">Software Update</h3>
-                            <p class="text-xs text-gray-500 mt-0.5">Check whether a newer version of Keystone is available and review the latest release.</p>
+                            <p class="text-xs text-gray-500 mt-0.5">Check whether the tracked git branch has newer commits. Updates pull and rebuild from git — no release required.</p>
                         </div>
                         <div class="px-6 py-5">
                             <div class="flex items-center gap-3">
@@ -2926,7 +2928,9 @@
                                 </div>
                                 <div>
                                     <p class="text-sm font-medium text-gray-900">Current version</p>
-                                    <p class="text-sm text-gray-600">v<span x-text="currentVersion"></span></p>
+                                    <p class="text-sm text-gray-600">v<span x-text="currentVersion"></span>
+                                        <span x-show="currentCommit" class="text-gray-400">· commit <span x-text="currentCommit ? currentCommit.slice(0, 7) : ''"></span></span>
+                                    </p>
                                 </div>
                             </div>
 
@@ -2946,7 +2950,7 @@
                                 <template x-if="update.loaded && isUpdateAvailable && !update.canApply && !update.applied">
                                     <a :href="update.latest.url" target="_blank" rel="noopener" class="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition">
                                         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
-                                        Update to v<span x-text="update.latest.tag.replace(/^v/, '')"></span>
+                                        View commit <span x-text="update.latest.tag"></span>
                                     </a>
                                 </template>
                             </div>
@@ -2959,18 +2963,18 @@
                                 </template>
                                 <template x-if="isUpdateAvailable && !update.applied">
                                     <p class="text-green-700 bg-green-50 border border-green-200 rounded-lg px-4 py-3">
-                                        A new version <strong>v<span x-text="update.latest.tag"></span></strong> is available.
+                                        New commits are available on the tracked branch (<strong><span x-text="update.latest.tag"></span></strong>).
                                         <template x-if="update.latest.name"><span class="text-green-600 block">"<span x-text="update.latest.name"></span>"</span></template>
                                     </p>
                                 </template>
                                 <template x-if="!isUpdateAvailable && !update.latest.tag && !update.applied">
                                     <p class="text-gray-700 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3">
-                                        No update available for now. We'll let you know when a new version is released.
+                                        No new commits on the tracked branch.
                                     </p>
                                 </template>
                                 <template x-if="!isUpdateAvailable && update.latest.tag && !update.applied">
                                     <p class="text-green-700 bg-green-50 border border-green-200 rounded-lg px-4 py-3">
-                                        You are running the latest version (<strong>v<span x-text="currentVersion"></span></strong>).
+                                        You are running the latest commit (<strong><span x-text="update.latest.tag"></span></strong>).
                                     </p>
                                 </template>
                             </div>

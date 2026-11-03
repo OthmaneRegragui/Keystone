@@ -424,24 +424,29 @@ pub struct AdminApiKeyDto {
 
 // ─── Software Update ─────────────────────────────────────────
 
-/// Details about the newest published release (from GitHub).
+/// Details about the newest commit on the tracked branch (from GitHub).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateReleaseDto {
+    /// Short commit SHA.
     pub tag: String,
+    /// First line of the commit message.
     pub name: String,
     pub url: String,
+    /// Commit author date.
     pub published_at: Option<String>,
     pub is_prerelease: bool,
 }
 
-/// Result of checking for a newer Keystone release.
+/// Result of checking for a newer Keystone commit.
 #[derive(Debug, Serialize)]
 pub struct UpdateCheckDto {
     /// Version of the currently running server (e.g. "0.4.0").
     pub current_version: String,
-    /// The newest release found, if the update source could be reached.
+    /// Git commit the running binary was built from, when known.
+    pub current_commit: Option<String>,
+    /// The remote branch's HEAD commit, if the update source could be reached.
     pub latest: Option<UpdateReleaseDto>,
-    /// True when `latest` is set and newer than `current_version`.
+    /// True when the remote HEAD commit differs from `current_commit`.
     pub update_available: bool,
     /// True when the server has a working way to pull and restart itself, so
     /// the panel can offer a one-click "Update & Restart" button instead of

@@ -126,6 +126,13 @@ fi
 mkdir -p "$UPDATE_REQUEST_DIR"
 export UPDATE_REQUEST_DIR
 
+# The running commit is what the admin update check compares against the remote
+# branch HEAD. Rebuilding after `git pull` therefore makes the panel report "up
+# to date". Compose passes this into the container at runtime, so the value is
+# always the source tree that produced the current image.
+KEYSTONE_GIT_COMMIT="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+export KEYSTONE_GIT_COMMIT
+
 # --- first-run setup -------------------------------------------------------
 if [ ! -f .env ]; then
   cp .env.example .env

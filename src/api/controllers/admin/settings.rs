@@ -18,103 +18,133 @@ pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Compare two dotted version strings (e.g. "0.4.0", "1.2.3"). Returns:
-///   - 1 if `a` is newer than `b`
-///   - -1 if `a` is older than `b`
-///   - 0 if equal
-fn compare_versions(a: &str, b: &str) -> i32 {
-    let pa: Vec<i64> = a
-        .trim_start_matches('v')
-        .split('.')
-        .filter_map(|p| p.parse().ok())
-        .collect();
-    let pb: Vec<i64> = b
-        .trim_start_matches('v')
-        .split('.')
-        .filter_map(|p| p.parse().ok())
-        .collect();
-    let n = pa.len().max(pb.len());
-    for i in 0..n {
-        let x = pa.get(i).copied().unwrap_or(0);
-        let y = pb.get(i).copied().unwrap_or(0);
-        if x > y {
-            return 1;
-        }
-        if x < y {
-            return -1;
+/// The git commit the running binary was built from, if it can be determined.
+///
+/// Docker runs get this from `KEYSTONE_GIT_COMMIT`, which `docker-run.sh`
+/// exports from the checked-out repo before `compose up`. Local builds fall
+/// back to reading `.git/HEAD` from the working tree. `None` means the check
+/// cannot compare commits; it then reports the remote HEAD without claiming an
+/// update is available.
+pub fn current_commit() -> Option<String> {
+    if let Ok(raw) = std::env::var("KEYSTONE_GIT_COMMIT") {
+        let sha = raw.trim();
+        if !sha.is_empty() && !sha.eq_ignore_ascii_case("unknown") {
+            return Some(sha.to_ascii_lowercase());
         }
     }
-    0
-}
 
-/// GitHub release payload — only the fields we need.
-#[derive(serde::Deserialize, Default)]
-struct GithubRelease {
-    tag_name: Option<String>,
-    name: Option<String>,
-    html_url: Option<String>,
-    published_at: Option<String>,
-    prerelease: Option<bool>,
-}
-
-/// Pick the highest dotted version from a list of tag names (ignores names
-/// without any numeric component, e.g. "main", "nightly").
-fn newest_version_tag<'a>(tags: impl Iterator<Item = &'a str>) -> Option<String> {
-    let mut newest: Option<String> = None;
-    for tag in tags {
-        let candidate = tag.trim_start_matches('v').to_string();
-        let has_number = candidate
-            .split('.')
-            .filter_map(|p| p.parse::<i64>().ok())
-            .next()
-            .is_some();
-        if !has_number {
-            continue;
+    // Compile-time value, for builds where the variable was present while
+    // compiling but is absent from the runtime environment.
+    if let Some(raw) = option_env!("KEYSTONE_GIT_COMMIT") {
+        let sha = raw.trim();
+        if !sha.is_empty() && !sha.eq_ignore_ascii_case("unknown") {
+            return Some(sha.to_ascii_lowercase());
         }
-        match &newest {
-            Some(cur) => {
-                if compare_versions(&candidate, cur) > 0 {
-                    newest = Some(candidate);
+    }
+
+    read_git_head().map(|sha| sha.to_ascii_lowercase())
+}
+
+/// Resolve `HEAD` by walking up from the current directory until a `.git`
+/// entry is found. Supports a normal `.git` directory and a worktree's `.git`
+/// file (which contains `gitdir: ...`).
+fn read_git_head() -> Option<String> {
+    use std::path::{Path, PathBuf};
+
+    fn read_ref(git_dir: &Path, reference: &str) -> Option<String> {
+        // Worktrees keep refs in the common dir, not in the per-worktree dir.
+        let common_dir = std::fs::read_to_string(git_dir.join("commondir"))
+            .ok()
+            .map(|raw| {
+                let path = PathBuf::from(raw.trim());
+                if path.is_absolute() {
+                    path
+                } else {
+                    git_dir.join(path)
+                }
+            })
+            .unwrap_or_else(|| git_dir.to_path_buf());
+
+        for base in [common_dir, git_dir.to_path_buf()] {
+            if let Ok(sha) = std::fs::read_to_string(base.join(reference)) {
+                let sha = sha.trim();
+                if !sha.is_empty() {
+                    return Some(sha.to_string());
                 }
             }
-            None => newest = Some(candidate),
+        }
+        None
+    }
+
+    fn resolve(git_dir: &Path) -> Option<String> {
+        let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+        let head = head.trim();
+        if let Some(reference) = head.strip_prefix("ref: ") {
+            read_ref(git_dir, reference.trim())
+        } else if !head.is_empty() {
+            Some(head.to_string())
+        } else {
+            None
         }
     }
-    newest
+
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        let dot_git = dir.join(".git");
+        if dot_git.is_dir() {
+            if let Some(sha) = resolve(&dot_git) {
+                return Some(sha);
+            }
+        } else if dot_git.is_file() {
+            let contents = std::fs::read_to_string(&dot_git).ok()?;
+            let git_dir = contents
+                .trim()
+                .strip_prefix("gitdir:")
+                .map(str::trim)
+                .map(PathBuf::from)?;
+            let git_dir = if git_dir.is_absolute() {
+                git_dir
+            } else {
+                dir.join(git_dir)
+            };
+            if let Some(sha) = resolve(&git_dir) {
+                return Some(sha);
+            }
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
 }
 
-/// Many projects only push version tags (e.g. `v0.6.0`) without creating
-/// formal GitHub "releases". Fall back to the newest tag in that case so the
-/// update check still works.
-async fn fetch_latest_tag(
-    client: &reqwest::Client,
-    repo: &str,
-) -> Result<Option<GithubRelease>, String> {
-    #[derive(serde::Deserialize)]
-    struct Tag {
-        name: String,
+/// True when two commit SHAs refer to the same commit. Short and full SHAs are
+/// both accepted.
+fn commits_match(a: &str, b: &str) -> bool {
+    let a = a.trim().to_ascii_lowercase();
+    let b = b.trim().to_ascii_lowercase();
+    if a.is_empty() || b.is_empty() {
+        return false;
     }
+    a.starts_with(&b) || b.starts_with(&a)
+}
 
-    let url = format!("https://api.github.com/repos/{repo}/tags");
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("update check (tags) failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Ok(None);
-    }
-    let tags: Vec<Tag> = resp
-        .json()
-        .await
-        .map_err(|e| format!("failed to parse tags: {e}"))?;
+/// GitHub commit payload — only the fields we need.
+#[derive(serde::Deserialize, Default)]
+struct GithubCommit {
+    sha: Option<String>,
+    html_url: Option<String>,
+    commit: Option<GithubCommitDetails>,
+}
 
-    let newest = newest_version_tag(tags.iter().map(|t| t.name.as_str()));
-    Ok(newest.map(|tag| GithubRelease {
-        tag_name: Some(tag),
-        html_url: Some(format!("https://github.com/{repo}/releases")),
-        ..GithubRelease::default()
-    }))
+#[derive(serde::Deserialize, Default)]
+struct GithubCommitDetails {
+    message: Option<String>,
+    author: Option<GithubCommitAuthor>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct GithubCommitAuthor {
+    date: Option<String>,
 }
 
 fn hook_is_usable(hook: &str) -> bool {
@@ -130,45 +160,43 @@ fn can_apply(config: &crate::config::UpdateConfig) -> bool {
         || (!hook.is_empty() && hook_is_usable(hook))
 }
 
-/// Response shown when the repository has no published releases or version
-/// tags to compare against. This is a normal state for a young project, not an
-/// error the admin needs to act on.
-fn no_update_available_response() -> Json<UpdateCheckDto> {
+fn update_check_response(
+    latest: Option<UpdateReleaseDto>,
+    update_available: bool,
+    can_apply: bool,
+    error: Option<String>,
+) -> Json<UpdateCheckDto> {
     Json(UpdateCheckDto {
         current_version: current_version().to_string(),
-        latest: None,
-        update_available: false,
-        can_apply: false,
-        error: None,
-    })
-}
-
-fn update_response(release: GithubRelease, repo: &str, can_apply: bool) -> Json<UpdateCheckDto> {
-    let tag = release.tag_name.unwrap_or_default();
-    let latest = UpdateReleaseDto {
-        tag: tag.clone(),
-        name: release.name.unwrap_or_default(),
-        url: release.html_url.unwrap_or_else(|| format!("https://github.com/{repo}/releases")),
-        published_at: release.published_at,
-        is_prerelease: release.prerelease.unwrap_or(false),
-    };
-
-    let update_available = !tag.is_empty() && compare_versions(&tag, current_version()) > 0;
-
-    Json(UpdateCheckDto {
-        current_version: current_version().to_string(),
-        latest: Some(latest),
+        current_commit: current_commit(),
+        latest,
         update_available,
         can_apply,
-        error: None,
+        error,
     })
 }
 
-/// Check GitHub for a newer release than the running version.
+/// First line of a commit message, trimmed to a comfortable display length.
+fn commit_summary(message: &str) -> String {
+    let first = message.lines().next().unwrap_or("").trim();
+    if first.chars().count() <= 120 {
+        first.to_string()
+    } else {
+        let mut summary: String = first.chars().take(117).collect();
+        summary.push_str("...");
+        summary
+    }
+}
+
+/// Check the remote branch's HEAD commit against the commit the running binary
+/// was built from.
+///
+/// Updates are tracked by git commit rather than published releases: the apply
+/// path is `git pull --ff-only && ./docker-run.sh`, so any new commit on the
+/// branch is an available update, whether or not a release was cut.
 ///
 /// Fails soft: network and rate-limit problems are reported as an error message
-/// instead of a 500. A repository with no releases or version tags is treated
-/// as simply having no update available.
+/// instead of a 500.
 pub async fn check_update(
     State(state): State<Arc<AppState>>,
     auth: AuthUser,
@@ -183,8 +211,10 @@ pub async fn check_update(
     } else {
         repo
     };
+    let branch = state.config.update.branch.trim();
+    let branch = if branch.is_empty() { "main" } else { branch };
     let can_apply = can_apply(&state.config.update);
-    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let url = format!("https://api.github.com/repos/{repo}/commits/{branch}");
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -195,64 +225,95 @@ pub async fn check_update(
     let resp = match client.get(&url).send().await {
         Ok(r) => r,
         Err(e) => {
-            return Ok(Json(UpdateCheckDto {
-                current_version: current_version().to_string(),
-                latest: None,
-                update_available: false,
-                can_apply: false,
-                error: Some(format!("update check failed: {e}")),
-            }));
+            return Ok(update_check_response(
+                None,
+                false,
+                can_apply,
+                Some(format!("update check failed: {e}")),
+            ));
         }
     };
 
     let status = resp.status();
-    if status == reqwest::StatusCode::NOT_FOUND {
-        // No formal GitHub releases — fall back to version tags.
-        return match fetch_latest_tag(&client, &repo).await {
-            Ok(Some(release)) => Ok(update_response(release, &repo, can_apply)),
-            Ok(None) => Ok(no_update_available_response()),
-            Err(e) => Ok(Json(UpdateCheckDto {
-                current_version: current_version().to_string(),
-                latest: None,
-                update_available: false,
-                can_apply: false,
-                error: Some(e),
-            })),
-        };
-    }
     if status == reqwest::StatusCode::FORBIDDEN {
-        return Ok(Json(UpdateCheckDto {
-            current_version: current_version().to_string(),
-            latest: None,
-            update_available: false,
-            can_apply: false,
-            error: Some("update check rate limited by GitHub — try again later".to_string()),
-        }));
+        return Ok(update_check_response(
+            None,
+            false,
+            can_apply,
+            Some("update check rate limited by GitHub — try again later".to_string()),
+        ));
+    }
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(update_check_response(
+            None,
+            false,
+            can_apply,
+            Some(format!("branch '{branch}' was not found in {repo}")),
+        ));
     }
     if !status.is_success() {
-        return Ok(Json(UpdateCheckDto {
-            current_version: current_version().to_string(),
-            latest: None,
-            update_available: false,
-            can_apply: false,
-            error: Some(format!("update check failed with status {status}")),
-        }));
+        return Ok(update_check_response(
+            None,
+            false,
+            can_apply,
+            Some(format!("update check failed with status {status}")),
+        ));
     }
 
-    let release: GithubRelease = match resp.json().await {
-        Ok(r) => r,
+    let commit: GithubCommit = match resp.json().await {
+        Ok(c) => c,
         Err(e) => {
-            return Ok(Json(UpdateCheckDto {
-                current_version: current_version().to_string(),
-                latest: None,
-                update_available: false,
-                can_apply: false,
-                error: Some(format!("failed to parse release info: {e}")),
-            }));
+            return Ok(update_check_response(
+                None,
+                false,
+                can_apply,
+                Some(format!("failed to parse commit info: {e}")),
+            ));
         }
     };
 
-    Ok(update_response(release, &repo, can_apply))
+    let remote_sha = commit.sha.unwrap_or_default();
+    if remote_sha.is_empty() {
+        return Ok(update_check_response(
+            None,
+            false,
+            can_apply,
+            Some("GitHub returned a commit without a SHA".to_string()),
+        ));
+    }
+
+    let latest = UpdateReleaseDto {
+        tag: remote_sha.chars().take(7).collect(),
+        name: commit
+            .commit
+            .as_ref()
+            .and_then(|c| c.message.as_deref())
+            .map(commit_summary)
+            .unwrap_or_default(),
+        url: commit
+            .html_url
+            .unwrap_or_else(|| format!("https://github.com/{repo}/commit/{remote_sha}")),
+        published_at: commit
+            .commit
+            .as_ref()
+            .and_then(|c| c.author.as_ref())
+            .and_then(|a| a.date.clone()),
+        is_prerelease: false,
+    };
+
+    // Only claim an update when the running commit is known; otherwise the
+    // latest commit is still shown, but the admin gets no false positive.
+    let update_available = match current_commit() {
+        Some(current) => !commits_match(&current, &remote_sha),
+        None => false,
+    };
+
+    Ok(update_check_response(
+        Some(latest),
+        update_available,
+        can_apply,
+        None,
+    ))
 }
 
 /// Trigger the update: either drop a request file for the host-side watcher
@@ -416,12 +477,12 @@ pub async fn update_captcha_setting(
 
 #[cfg(test)]
 mod tests {
-    use super::{can_apply, compare_versions, newest_version_tag, no_update_available_response};
+    use super::{can_apply, commit_summary, commits_match, update_check_response};
     use crate::config::UpdateConfig;
 
     #[test]
-    fn no_release_or_tag_is_not_reported_as_an_error() {
-        let response = no_update_available_response().0;
+    fn update_check_response_includes_the_running_version() {
+        let response = update_check_response(None, false, false, None).0;
         assert_eq!(response.current_version, super::current_version());
         assert!(response.latest.is_none());
         assert!(!response.update_available);
@@ -444,51 +505,33 @@ mod tests {
     }
 
     #[test]
-    fn compare_versions_accepts_v_prefix() {
-        assert_eq!(compare_versions("v0.6.0", "0.5.0"), 1);
-        assert_eq!(compare_versions("0.6.0", "0.6.0"), 0);
-        assert_eq!(compare_versions("0.5.1", "0.6.0"), -1);
-        assert_eq!(compare_versions("v0.6.10", "0.6.9"), 1);
+    fn commits_match_accepts_short_and_full_shas() {
+        let full = "db8f15c0123456789abcdef0123456789abcdef0";
+        assert!(commits_match("db8f15c", full));
+        assert!(commits_match(full, "db8f15c"));
+        assert!(commits_match(full, full));
+        assert!(commits_match("DB8F15C", full));
     }
 
     #[test]
-    fn newest_version_tag_picks_the_max() {
-        let tags = ["v0.5.0", "0.6.0", "release-notes", "v0.6.1"];
-        assert_eq!(newest_version_tag(tags.iter().copied()).unwrap(), "0.6.1");
+    fn commits_match_rejects_different_commits() {
+        let a = "db8f15c0123456789abcdef0123456789abcdef0";
+        let b = "29df5160123456789abcdef0123456789abcdef0";
+        assert!(!commits_match(a, b));
+        assert!(!commits_match("", a));
     }
 
     #[test]
-    fn newest_version_tag_skips_non_version_tags() {
-        assert_eq!(newest_version_tag(["main", "nightly"].into_iter()), None);
-        assert_eq!(newest_version_tag(std::iter::empty::<&str>()), None);
+    fn commit_summary_uses_the_first_line() {
+        assert_eq!(commit_summary("Add mirroring\n\nLong body"), "Add mirroring");
+        assert_eq!(commit_summary("  trimmed  \nbody"), "trimmed");
     }
 
     #[test]
-    fn newest_version_tag_detects_newer_than_running() {
-        // The scenario from the bug report: the repo has no releases, only
-        // version tags, and the newest tag is newer than the running server.
-        // Built from `current_version()` so this test does not need editing on
-        // every release bump (it used to hardcode "0.7.0" and broke at 0.8.0).
-        let current = super::current_version();
-        let older = current.rsplit_once('.').map(|(maj_min, _)| format!("{maj_min}.0"));
-        let mut tags = vec![older.clone().unwrap_or_else(|| "v0.0.1".into())];
-        tags.push(format!("v{current}"));
-        // A tag one patch ahead of the running version, e.g. 0.8.0 -> 0.8.1.
-        let newer = match current.rsplit_once('.') {
-            Some((maj_min, patch)) => {
-                let next: u64 = patch.parse().unwrap_or(0) + 1;
-                format!("v{maj_min}.{next}")
-            }
-            None => format!("v{current}-next"),
-        };
-        tags.push(newer.clone());
-
-        assert_eq!(
-            newest_version_tag(tags.iter().map(String::as_str)).unwrap(),
-            newer.trim_start_matches('v')
-        );
-        assert_eq!(compare_versions(&newer, current), 1);
-        // The running version itself must compare equal, not "newer".
-        assert_eq!(compare_versions(current, current), 0);
+    fn commit_summary_truncates_long_subjects() {
+        let subject = "x".repeat(200);
+        let summary = commit_summary(&subject);
+        assert_eq!(summary.chars().count(), 120);
+        assert!(summary.ends_with("..."));
     }
 }
