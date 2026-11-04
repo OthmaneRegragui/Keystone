@@ -133,6 +133,23 @@
                             return fetch(url, options);
                         });
                     }
+                    if (r.status === 429) {
+                        // Bursts from a page that fires several loaders at once can
+                        // briefly trip the per-IP limiter. Retry once after the
+                        // server's Retry-After (default 1s) instead of letting a
+                        // loader store the error payload as its data.
+                        var retryAfter = parseInt(r.headers.get('retry-after'), 10);
+                        if (isNaN(retryAfter) || retryAfter < 0) retryAfter = 1;
+                        retryAfter = Math.min(retryAfter, 5);
+                        return new Promise(function(resolve) {
+                            setTimeout(function() {
+                                var tok = null;
+                                try { tok = localStorage.getItem('token'); } catch (e) {}
+                                options.headers['Authorization'] = 'Bearer ' + tok;
+                                resolve(fetch(url, options));
+                            }, retryAfter * 1000 + 100);
+                        });
+                    }
                     return r;
                 });
             }
@@ -502,36 +519,36 @@
                 loadUsers: function() {
                     var self = this;
                     authFetch('/api/admin/users')
-                        .then(function(r) { return r.json(); })
-                        .then(function(d) { self.users = d; })
+                        .then(function(r) { return r.ok ? r.json() : []; })
+                        .then(function(d) { self.users = Array.isArray(d) ? d : []; })
                         .catch(function() {});
                 },
                 loadBuckets: function() {
                     var self = this;
                     authFetch('/api/admin/buckets')
-                        .then(function(r) { return r.json(); })
-                        .then(function(d) { self.buckets = d; })
+                        .then(function(r) { return r.ok ? r.json() : []; })
+                        .then(function(d) { self.buckets = Array.isArray(d) ? d : []; })
                         .catch(function() {});
                 },
                 loadBackends: function() {
                     var self = this;
                     authFetch('/api/admin/backends')
-                        .then(function(r) { return r.json(); })
-                        .then(function(d) { self.backends = d; })
+                        .then(function(r) { return r.ok ? r.json() : []; })
+                        .then(function(d) { self.backends = Array.isArray(d) ? d : []; })
                         .catch(function() {});
                 },
                 loadGroups: function() {
                     var self = this;
                     authFetch('/api/admin/groups')
-                        .then(function(r) { return r.json(); })
-                        .then(function(d) { self.groups = d; })
+                        .then(function(r) { return r.ok ? r.json() : []; })
+                        .then(function(d) { self.groups = Array.isArray(d) ? d : []; })
                         .catch(function() {});
                 },
                 loadStoragePaths: function() {
                     var self = this;
                     authFetch('/api/admin/paths')
-                        .then(function(r) { return r.json(); })
-                        .then(function(d) { self.storagePaths = d; })
+                        .then(function(r) { return r.ok ? r.json() : []; })
+                        .then(function(d) { self.storagePaths = Array.isArray(d) ? d : []; })
                         .catch(function() {});
                 },
                 loadStorageBase: function() {
@@ -582,8 +599,8 @@
                 loadConnections: function() {
                     var self = this;
                     authFetch('/api/admin/connections')
-                        .then(function(r) { return r.json(); })
-                        .then(function(d) { self.connections = d || []; })
+                        .then(function(r) { return r.ok ? r.json() : []; })
+                        .then(function(d) { self.connections = Array.isArray(d) ? d : []; })
                         .catch(function() {});
                 },
                 blankConnection: function() {
@@ -1330,7 +1347,7 @@
 <body class="h-full bg-gray-50">
     <!--SIDEBAR-->
 
-        <main class="flex-1 overflow-auto" x-data="adminPanel()" x-init="init()">
+        <main class="flex-1 overflow-auto" x-data="adminPanel()">
             <div class="lg:hidden flex items-center gap-3 px-4 py-3 bg-white border-b border-gray-200 shrink-0">
                 <button x-on:click="toggleSidebar()" class="p-2 -ml-2 rounded-lg text-gray-600 hover:bg-gray-100 transition" aria-label="Toggle navigation menu">
                     <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
@@ -1342,10 +1359,10 @@
 
                 <div class="flex gap-1 mb-6 border-b border-gray-200 flex-wrap">
                     <button x-on:click="setTab('overview')" :class="tab==='overview' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Overview</button>
-                    <button x-on:click="setTab('paths')" :class="tab==='paths' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Paths</button>
                     <button x-on:click="setTab('connections')" :class="tab==='connections' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Connections</button>
-                    <button x-on:click="setTab('mirrors')" :class="tab==='mirrors' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Mirrors</button>
+                    <button x-on:click="setTab('paths')" :class="tab==='paths' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Paths</button>
                     <button x-on:click="setTab('buckets')" :class="tab==='buckets' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Buckets</button>
+                    <button x-on:click="setTab('mirrors')" :class="tab==='mirrors' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Mirrors</button>
                     <button x-on:click="setTab('groups')" :class="tab==='groups' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Groups</button>
                     <button x-on:click="setTab('users')" :class="tab==='users' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Users</button>
                     <button x-on:click="setTab('settings')" :class="tab==='settings' ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'" class="px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Settings</button>
